@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launch screen. Obsidian rather than the template white, so opening Chest
+  does not flash a bright frame before the dark UI appears.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/chest_obsidian" />
+</layer-list>

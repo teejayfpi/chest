@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches ChestTheme.obsidian so the launch frame blends into the UI. -->
+    <color name="chest_obsidian">#FF070A12</color>
+</resources>

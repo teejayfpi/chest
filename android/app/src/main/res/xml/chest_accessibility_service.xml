@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility service used to enforce the freeze locally.
+
+  Rationale: Android provides no supported way for a normal app to kill another
+  app's process. Two mechanisms exist in practice, and Chest uses both:
+
+    1. DevicePolicyManager.setApplicationHidden() — requires device-admin. This
+       is the authoritative freeze and needs no accessibility at all.
+    2. An accessibility service that detects the frozen package coming to the
+       foreground and immediately sends the user home. This is a *defence in
+       depth* layer for the window between a freeze request and the platform
+       applying it, and for OEM builds where setApplicationHidden is a no-op.
+
+  The service is strictly passive about content: it never reads window text,
+  never inspects node contents, and only compares the reported package name
+  against a locally stored frozen set. canRetrieveWindowContent is explicitly
+  false so the service is technically incapable of reading what is on screen.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="0"
+    android:summary="@string/accessibility_service_summary" />

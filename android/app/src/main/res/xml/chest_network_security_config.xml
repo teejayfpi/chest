@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chest declares no network permission, so nothing here can ever be reached.
+  The config exists as a second lock: if a future dependency is added that does
+  request INTERNET, cleartext traffic is still refused and no user certificate
+  authority is trusted.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup and device-transfer rules.
+
+  Chest opts out of both entirely. Android's auto-backup would otherwise copy
+  vault files and the Keystore-wrapped key blob off the device, and
+  device-to-device transfer would carry them to a new handset without the
+  passphrase ever being re-entered. Either path would silently widen where
+  encrypted data lives, so both are disabled.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

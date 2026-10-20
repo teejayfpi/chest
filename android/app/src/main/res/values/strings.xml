@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Chest</string>
-    <string name="accessibility_service_description">Chest uses this service to send you back to the home screen when you open an app you have frozen. It compares package names only and never reads the content of your screen.</string>
+    <string name="accessibility_service_description">Chest uses this service to block apps you have frozen. When a frozen app opens, Chest covers the screen and returns you home. It compares package names only and never reads the content of your screen.</string>
     <string name="accessibility_service_summary">Keep frozen apps closed</string>
     <string name="device_admin_description">Chest needs device administration to disable frozen apps at the operating-system level. It does not request password, camera or wipe rights.</string>
     <string name="share_file_title">Save or share decrypted file</string>
     <string name="file_provider_label">Chest sealed files</string>
+
+    <!-- Freeze shield, shown over a blocked app. -->
+    <string name="freeze_shield_glyph">\u25A0</string>
+    <string name="freeze_shield_title">Frozen by Chest</string>
+    <string name="freeze_shield_body">This app is frozen. Open Chest and pass the release check to use it again.</string>
 </resources>

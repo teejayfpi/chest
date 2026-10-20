@@ -100,6 +100,10 @@ object ChestAppLockManager {
                 label = label,
                 isSystem = isSystem,
                 frozen = isFrozen,
+                // "hidden" means gone from the launcher, which only device owner
+                // achieves. A package frozen by the accessibility tier is still
+                // in the launcher, and reporting it as hidden would misdescribe
+                // what the user sees.
                 hidden = isFrozen && isHidden(context, packageName),
             )
         }
@@ -132,35 +136,47 @@ object ChestAppLockManager {
     }
 
     /**
-     * Hides [packageName].
+     * Freezes [packageName].
      *
-     * Returns a map with `applied` (whether the platform hid the app) and
-     * `method` (`"device_owner"`, `"device_admin"` or `"soft"`).
+     * Two enforcement paths exist and the result says which one took effect:
+     *
+     *  - `"device_owner"` — the app is hidden from the launcher by the platform.
+     *    The strongest outcome, and the only one that removes the icon.
+     *  - `"accessibility"` — the app stays in the launcher but is blocked the
+     *    moment it opens, and its notifications are dismissed. This needs only
+     *    the accessibility toggle, so it is the phone-only path.
+     *
+     * The package is recorded in the local store whenever *either* path is
+     * available, because that store is what the accessibility service reads. It
+     * is deliberately not recorded when neither is available: a freeze that
+     * nothing enforces would show as active in the UI while the app opened
+     * normally, which is a false claim about the user's security.
      */
     fun freeze(context: Context, packageName: String, label: String): Map<String, Any> {
         if (PROTECTED_PACKAGES.contains(packageName)) {
             return mapOf("applied" to false, "method" to "protected")
         }
+
         val hidden = setHidden(context, packageName, hidden = true)
-        if (hidden) {
-            // Only record a package we actually hid. Recording a package that is
-            // still visible would leave the UI claiming a freeze that is not in
-            // force, and the boot receiver would keep re-applying nothing.
-            ChestAppLockStore.freeze(context, packageName, label)
+        val guardActive = isAccessibilityEnabled(context)
+
+        if (!hidden && !guardActive) {
+            // Nothing on this device can enforce a freeze yet. Say so rather than
+            // recording one, so the UI can send the user to grant access.
+            return mapOf("applied" to false, "method" to "none")
         }
-        broadcastFrozenSetChanged(context)
+
+        ChestAppLockStore.freeze(context, packageName, label)
+        FrozenSetRegistry.refresh(context)
+
         return mapOf(
-            "applied" to hidden,
-            "method" to when {
-                hidden && isDeviceOwner(context) -> "device_owner"
-                hidden -> "device_admin"
-                else -> "soft"
-            },
+            "applied" to true,
+            "method" to if (hidden) "device_owner" else "accessibility",
         )
     }
 
     /**
-     * Unhides [packageName].
+     * Unfreezes [packageName].
      *
      * Unhiding is attempted even when the package is absent from the local
      * store, so a freeze recorded by an earlier version of Chest is still
@@ -169,10 +185,10 @@ object ChestAppLockManager {
     fun unfreeze(context: Context, packageName: String): Map<String, Any> {
         val unhidden = setHidden(context, packageName, hidden = false)
         ChestAppLockStore.unfreeze(context, packageName)
-        broadcastFrozenSetChanged(context)
+        FrozenSetRegistry.refresh(context)
         return mapOf(
-            "applied" to unhidden,
-            "method" to if (unhidden) "device_owner" else "soft",
+            "applied" to true,
+            "method" to if (unhidden) "device_owner" else "accessibility",
         )
     }
 
@@ -186,30 +202,42 @@ object ChestAppLockManager {
      */
     fun unhideAll(context: Context): Map<String, Any> {
         val recorded = ChestAppLockStore.frozenPackages(context)
+        val hiding = canHideApps(context)
         var restored = 0
         var failed = 0
         for (packageName in recorded) {
-            if (setHidden(context, packageName, hidden = false)) restored++ else failed++
+            // Best effort on the platform side. With only the app guard active
+            // there is nothing hidden to undo, and the freeze is lifted simply by
+            // clearing the store below.
+            if (!hiding || setHidden(context, packageName, hidden = false)) {
+                restored++
+            } else {
+                failed++
+            }
         }
+        // Cleared even when a platform unhide failed, because this is the escape
+        // hatch: the app guard reads this store, so clearing it always releases
+        // the apps from being blocked.
         ChestAppLockStore.clear(context)
-        broadcastFrozenSetChanged(context)
+        FrozenSetRegistry.refresh(context)
         return mapOf(
-            "applied" to (failed == 0),
+            "applied" to true,
             "restored" to restored,
             "failed" to failed,
-            "method" to "device_owner",
+            "method" to if (hiding) "device_owner" else "accessibility",
         )
     }
 
     /**
      * Re-applies the recorded hidden state to the platform.
      *
-     * Run at boot and after an app update, so a crash or a failed write cannot
-     * leave an app hidden with no record of how to restore it — or conversely,
-     * leave the store claiming a hide the platform has forgotten.
+     * Run at boot and after an app update. The accessibility tier needs no
+     * re-application — its service reads the same store on every event — so this
+     * only matters when Chest is device owner, and it returns early otherwise
+     * rather than pretending to have done something.
      */
     fun reconcile(context: Context) {
-        if (!isDeviceOwner(context) && !isProfileOwner(context)) return
+        if (!canHideApps(context)) return
         val recorded = ChestAppLockStore.frozenPackages(context)
         if (recorded.isEmpty()) return
         for (packageName in recorded) {
@@ -246,13 +274,20 @@ object ChestAppLockManager {
     fun isAccessibilityEnabled(context: Context): Boolean =
         ChestAppLockStore.isAccessibilityServiceEnabled(context, ChestAppLockService::class.java)
 
+    /** True when the user has granted Chest notification access. */
+    fun isNotificationAccessEnabled(context: Context): Boolean =
+        ChestNotificationGuard.isEnabled(context)
+
     /**
-     * True when the platform will accept a hide request.
+     * True when the platform will accept a hide request for the user's own apps.
      *
-     * Device owner and profile owner both satisfy the platform's permission
-     * check; legacy device admin does not.
+     * Device owner only. A profile owner also passes the platform's permission
+     * check, but it governs a separate work profile: it can hide work apps and
+     * cannot touch the personal apps shown in the main launcher. Counting it here
+     * would make Chest report a hide it cannot perform on the apps the user is
+     * actually looking at.
      */
-    fun canHideApps(context: Context): Boolean = isDeviceOwner(context) || isProfileOwner(context)
+    fun canHideApps(context: Context): Boolean = isDeviceOwner(context)
 
     /** Number of packages Chest currently has hidden. */
     fun hiddenCount(context: Context): Int =
@@ -282,16 +317,17 @@ object ChestAppLockManager {
      * Calls [DevicePolicyManager.setApplicationHidden].
      *
      * `setApplicationHidden` is API 21+ and, from API 24, is restricted to device
-     * and profile owners. When Chest holds neither, this returns false and the
-     * caller falls back to the soft tier rather than reporting a freeze that did
-     * not happen.
+     * owners and profile owners. Chest only counts a device owner, because a
+     * profile owner could not hide the personal apps the user is looking at. When
+     * Chest is not device owner this returns false and the caller falls back to
+     * the accessibility tier rather than reporting a hide that did not happen.
      */
     private fun setHidden(context: Context, packageName: String, hidden: Boolean): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
             ?: return false
         if (!canHideApps(context)) {
-            Log.i(TAG, "not device/profile owner; $packageName stays soft-frozen")
+            Log.i(TAG, "not device owner; $packageName falls back to the accessibility tier")
             return false
         }
         val admin = ComponentName(context, ChestDeviceAdminReceiver::class.java)
@@ -308,10 +344,4 @@ object ChestAppLockManager {
     }
 
     /** Tells a running [ChestAppLockService] to re-read the frozen set. */
-    private fun broadcastFrozenSetChanged(context: Context) {
-        val intent = android.content.Intent(ChestAppLockService.ACTION_FROZEN_SET_CHANGED).apply {
-            setPackage(context.packageName)
-        }
-        context.sendBroadcast(intent)
-    }
 }

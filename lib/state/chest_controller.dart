@@ -658,18 +658,18 @@ class ChestController extends ChangeNotifier {
     }
   }
 
-  /// Freezes [app], updating the list in place.
+  /// Freezes [app], recording it only if something can actually enforce it.
   ///
-  /// Freezing is not gated. It only *adds* protection — the app leaves the
-  /// launcher and its data stays intact and sealed — so demanding a passphrase
+  /// Freezing is not gated. It only *adds* protection, so demanding a passphrase
   /// for it would make securing a dozen apps a dozen prompts while weakening
   /// nothing. Releasing is the direction that exposes data, and that is the one
   /// [releaseApp] gates.
   ///
-  /// The result is reported honestly: when the platform refused the hide (no
-  /// device-owner provisioning), the app is *not* marked frozen, because a
-  /// frozen flag the platform does not back would tell the user an app is hidden
-  /// from the launcher when it is not.
+  /// The result is reported honestly. `applied` means a real mechanism took
+  /// effect — either the platform hid the app, or the app guard will block it on
+  /// open. When neither is available the app is *not* marked frozen, because a
+  /// frozen flag nothing backs would tell the user an app is contained when it
+  /// opens normally.
   Future<FreezeResult> freezeApp(FreezableApp app) async {
     if (app.frozen) {
       return const FreezeResult(applied: true, method: 'noop');

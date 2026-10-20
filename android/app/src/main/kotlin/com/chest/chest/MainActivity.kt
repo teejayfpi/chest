@@ -133,6 +133,16 @@ class MainActivity : FlutterFragmentActivity() {
                             )
                             result.success(true)
                         }
+                        "openNotificationAccessSettings" -> {
+                            // The only supported way to reach the notification-access
+                            // grant. Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+                            // is API 22+, and Chest's minSdk is above that.
+                            startActivity(
+                                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                            result.success(true)
+                        }
                         "openAppDetailsSettings" -> {
                             val pkg = call.argument<String>("packageName")
                             val intent = if (pkg.isNullOrEmpty()) {
@@ -301,6 +311,7 @@ class MainActivity : FlutterFragmentActivity() {
         "profileOwnerActive" to ChestAppLockManager.isProfileOwner(this),
         "deviceAdminActive" to ChestAppLockManager.isDeviceAdminActive(this),
         "accessibilityEnabled" to ChestAppLockManager.isAccessibilityEnabled(this),
+        "notificationAccessEnabled" to ChestAppLockManager.isNotificationAccessEnabled(this),
         "canHideApps" to ChestAppLockManager.canHideApps(this),
         "hiddenCount" to ChestAppLockManager.hiddenCount(this),
         "sdkInt" to Build.VERSION.SDK_INT,

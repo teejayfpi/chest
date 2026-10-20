@@ -91,7 +91,8 @@
 
         <!--
           Enforcement service. Bound by the framework only after the user
-          enables it in Accessibility settings.
+          enables it in Accessibility settings. Needs no computer and no factory
+          reset: this is the phone-only tier.
         -->
         <service
             android:name=".applock.ChestAppLockService"
@@ -104,6 +105,22 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/chest_accessibility_service" />
+        </service>
+
+        <!--
+          Dismisses notifications from frozen apps. A separate service because an
+          accessibility service cannot cancel another app's notification; only a
+          NotificationListenerService can. Granted on the device, in Settings,
+          with no computer involved.
+        -->
+        <service
+            android:name=".applock.ChestNotificationGuard"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <!--

@@ -51,12 +51,12 @@ class AppLockBridge {
         {'packageName': packageName, 'label': label ?? packageName},
       );
       _available = true;
-      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
       return FreezeResult.fromMap(raw);
     } on MissingPluginException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     } on PlatformException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     }
   }
 
@@ -68,12 +68,12 @@ class AppLockBridge {
         {'packageName': packageName},
       );
       _available = true;
-      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
       return FreezeResult.fromMap(raw);
     } on MissingPluginException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     } on PlatformException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     }
   }
 
@@ -99,12 +99,12 @@ class AppLockBridge {
     try {
       final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('unhideAll');
       _available = true;
-      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
       return FreezeResult.fromMap(raw);
     } on MissingPluginException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     } on PlatformException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     }
   }
 
@@ -115,6 +115,13 @@ class AppLockBridge {
   /// Opens the system Accessibility settings page.
   Future<void> openAccessibilitySettings() =>
       _invokeVoid('openAccessibilitySettings');
+
+  /// Opens the system notification-access page.
+  ///
+  /// A separate grant from accessibility, needed to dismiss notifications from
+  /// frozen apps.
+  Future<void> openNotificationAccessSettings() =>
+      _invokeVoid('openNotificationAccessSettings');
 
   /// Opens the system app-details page for [packageName].
   Future<void> openAppDetailsSettings(String packageName) =>

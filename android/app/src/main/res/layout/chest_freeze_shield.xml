@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The shield drawn over a frozen app the instant it reaches the foreground.
+
+  This exists to close a specific gap: sending the user home is not
+  instantaneous, and in the few frames before the home transition completes the
+  frozen app is on screen and readable. On a messenger that means the last
+  message, on a gallery the last photo. The overlay is opaque and covers the
+  full screen from the first frame, so there is nothing to read even for an
+  instant.
+
+  Deliberately has no dismiss control. A button would be a way back into the app
+  being blocked, and the correct exit — the home screen — is already applied.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/chest_obsidian"
+    android:clickable="true"
+    android:focusable="true">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/freeze_shield_glyph"
+            android:textColor="@color/chest_gold"
+            android:textSize="44sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:letterSpacing="0.02"
+            android:text="@string/freeze_shield_title"
+            android:textColor="@color/chest_parchment"
+            android:textSize="19sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/chest_freeze_shield_detail"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:lineSpacingMultiplier="1.35"
+            android:maxWidth="260dp"
+            android:text="@string/freeze_shield_body"
+            android:textColor="@color/chest_muted"
+            android:textSize="13sp" />
+    </LinearLayout>
+</FrameLayout>

@@ -2,4 +2,12 @@
 <resources>
     <!-- Matches ChestTheme.obsidian so the launch frame blends into the UI. -->
     <color name="chest_obsidian">#FF070A12</color>
+
+    <!--
+      Freeze-shield palette. Mirrors ChestTheme so the overlay a frozen app sees
+      looks like part of Chest rather than a system error.
+    -->
+    <color name="chest_gold">#FFF0B94E</color>
+    <color name="chest_parchment">#FFE8ECF5</color>
+    <color name="chest_muted">#FF8A94AC</color>
 </resources>

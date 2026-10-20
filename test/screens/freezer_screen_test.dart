@@ -106,10 +106,15 @@ class FakeAppLockChannel {
           final args = call.arguments as Map;
           freezeCalls.add(args['packageName'] as String);
           freezeLabels.add(args['label'] as String);
-          // Mirrors the native rule: only a device owner can actually hide.
-          return (capabilities['deviceOwnerActive'] as bool? ?? false)
-              ? {'applied': true, 'method': 'device_owner'}
-              : {'applied': false, 'method': 'soft'};
+          // Mirrors the native rule: device owner hides, the app guard blocks,
+          // and with neither the freeze is refused rather than recorded.
+          if (capabilities['deviceOwnerActive'] as bool? ?? false) {
+            return {'applied': true, 'method': 'device_owner'};
+          }
+          if (capabilities['accessibilityEnabled'] as bool? ?? false) {
+            return {'applied': true, 'method': 'accessibility'};
+          }
+          return {'applied': false, 'method': 'none'};
         case 'unfreeze':
           final pkg = (call.arguments as Map)['packageName'] as String;
           unfreezeCalls.add(pkg);
@@ -148,6 +153,7 @@ class FakeAppLockChannel {
     bool profileOwnerActive = false,
     bool deviceAdminActive = false,
     bool accessibilityEnabled = true,
+    bool notificationAccessEnabled = false,
     int hiddenCount = 0,
   }) =>
       {
@@ -155,6 +161,7 @@ class FakeAppLockChannel {
         'profileOwnerActive': profileOwnerActive,
         'deviceAdminActive': deviceAdminActive,
         'accessibilityEnabled': accessibilityEnabled,
+        'notificationAccessEnabled': notificationAccessEnabled,
         'hiddenCount': hiddenCount,
         'sdkInt': 34,
       };
@@ -191,30 +198,35 @@ Future<ChestController> pumpFreezer(
 
 void main() {
   group('freezer enforcement panel', () {
-    testWidgets('says device owner is needed when it is not set up', (tester) async {
-      await pumpFreezer(tester, channel: FakeAppLockChannel());
-
-      expect(find.text('Device owner not set up'), findsOneWidget);
-      expect(find.textContaining('needs to be the device owner'), findsOneWidget);
-      expect(find.text('Grant device admin'), findsOneWidget);
-      // The app guard is already running in the default fake.
-      expect(find.text('Enable app guard'), findsNothing);
-    });
-
-    testWidgets('shows the provisioning command when not provisioned', (tester) async {
-      await pumpFreezer(tester, channel: FakeAppLockChannel());
-
-      expect(
-        find.text(
-          'adb shell dpm set-device-owner '
-          'com.chest.chest/.applock.ChestDeviceAdminReceiver',
+    testWidgets('offers the on-device app guard when nothing is set up', (tester) async {
+      await pumpFreezer(
+        tester,
+        channel: FakeAppLockChannel(
+          capabilities: FakeAppLockChannel.capabilitiesFor(accessibilityEnabled: false),
         ),
-        findsOneWidget,
       );
-      expect(find.textContaining('no accounts'), findsOneWidget);
+
+      expect(find.text('App guard is off'), findsOneWidget);
+      expect(find.text('Turn on app guard'), findsOneWidget);
+      // The setup path is on the phone, spelled out as steps.
+      expect(find.textContaining('Accessibility'), findsOneWidget);
+      expect(find.textContaining('no computer needed'), findsOneWidget);
+      // No shell command anywhere: this tier needs no computer.
+      expect(find.textContaining('adb shell dpm'), findsNothing);
     });
 
-    testWidgets('reports hiding active once device owner is granted', (tester) async {
+    testWidgets('reports the app guard as active without device owner', (tester) async {
+      // The phone-only tier. No provisioning of any kind has happened.
+      await pumpFreezer(tester, channel: FakeAppLockChannel());
+
+      expect(find.text('App guard active'), findsOneWidget);
+      expect(find.textContaining('cannot be opened'), findsOneWidget);
+      // Device owner is offered as an upgrade, never as a requirement.
+      expect(find.textContaining('device owner'), findsOneWidget);
+      expect(find.text('Turn on app guard'), findsNothing);
+    });
+
+    testWidgets('reports launcher hiding when device owner is granted', (tester) async {
       await pumpFreezer(
         tester,
         channel: FakeAppLockChannel(
@@ -226,10 +238,10 @@ void main() {
       );
 
       expect(find.text('Launcher hiding active'), findsOneWidget);
-      expect(find.textContaining('hidden from your launcher'), findsOneWidget);
-      expect(find.text('Grant device admin'), findsNothing);
-      expect(find.text('Enable app guard'), findsOneWidget);
-      // The setup command is no longer needed.
+      expect(find.textContaining('removed from your launcher'), findsOneWidget);
+      // The guard is still offered even with device owner: it is the layer that
+      // blocks the app on open and feeds the notification suppression.
+      expect(find.text('Turn on app guard'), findsOneWidget);
       expect(find.textContaining('adb shell dpm'), findsNothing);
     });
 
@@ -241,13 +253,50 @@ void main() {
         channel: FakeAppLockChannel(
           capabilities: FakeAppLockChannel.capabilitiesFor(
             deviceAdminActive: true,
-            accessibilityEnabled: false,
+            accessibilityEnabled: true,
           ),
         ),
       );
 
-      expect(find.text('Device owner not set up'), findsOneWidget);
       expect(find.text('Launcher hiding active'), findsNothing);
+      expect(find.text('App guard active'), findsOneWidget);
+    });
+
+    testWidgets('a profile owner does not claim launcher hiding', (tester) async {
+      // Regression guard: a profile owner governs a work profile and cannot hide
+      // the personal apps in the user's main launcher. Counting it as "can hide"
+      // would promise a hide on exactly the apps it cannot perform it on.
+      await pumpFreezer(
+        tester,
+        channel: FakeAppLockChannel(
+          capabilities: FakeAppLockChannel.capabilitiesFor(
+            profileOwnerActive: true,
+            accessibilityEnabled: true,
+          ),
+        ),
+      );
+
+      expect(find.text('Launcher hiding active'), findsNothing);
+      expect(find.textContaining('work profile'), findsOneWidget);
+    });
+
+    testWidgets('offers notification access once the guard is on', (tester) async {
+      await pumpFreezer(tester, channel: FakeAppLockChannel());
+
+      expect(find.text('Hide notifications'), findsOneWidget);
+    });
+
+    testWidgets('hides the notification prompt once granted', (tester) async {
+      await pumpFreezer(
+        tester,
+        channel: FakeAppLockChannel(
+          capabilities: FakeAppLockChannel.capabilitiesFor(
+            notificationAccessEnabled: true,
+          ),
+        ),
+      );
+
+      expect(find.text('Hide notifications'), findsNothing);
     });
   });
 
@@ -309,7 +358,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(channel.freezeCalls, ['com.example.photos']);
-      expect(find.textContaining('hidden from the launcher'), findsOneWidget);
+      expect(find.textContaining('hidden from your launcher'), findsOneWidget);
     });
 
     testWidgets('passes the label so it can be cached natively', (tester) async {
@@ -326,16 +375,36 @@ void main() {
       expect(channel.freezeLabels, ['Photos']);
     });
 
-    testWidgets('refuses to mark an app frozen without device owner', (tester) async {
-      // The native layer reports applied: false, so the switch must stay off
-      // rather than claiming a hide the platform did not perform.
+    testWidgets('freezes via the app guard when not device owner', (tester) async {
+      // The phone-only path: no provisioning, but the freeze is real because the
+      // app guard blocks the app on open.
       final channel = FakeAppLockChannel();
       await pumpFreezer(tester, channel: channel);
 
       await tester.tap(find.byType(Switch).first);
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('could not be hidden'), findsOneWidget);
+      expect(channel.freezeCalls, ['com.example.photos']);
+      // The snack bar and the panel both describe the guard, so the phrase
+      // legitimately appears twice.
+      expect(find.textContaining('cannot be opened'), findsWidgets);
+      // Photos was unfrozen, so the count goes from 1 to 2.
+      expect(find.text('2 frozen'), findsOneWidget);
+    });
+
+    testWidgets('refuses to record a freeze with no enforcement at all',
+        (tester) async {
+      // With neither device owner nor the app guard, nothing can enforce a
+      // freeze, so the switch must stay off rather than claiming one.
+      final channel = FakeAppLockChannel(
+        capabilities: FakeAppLockChannel.capabilitiesFor(accessibilityEnabled: false),
+      );
+      await pumpFreezer(tester, channel: channel);
+
+      await tester.tap(find.byType(Switch).first);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('could not be frozen'), findsOneWidget);
       expect(find.text('1 frozen'), findsOneWidget);
     });
 
@@ -425,20 +494,21 @@ void main() {
     });
 
     testWidgets('re-checking capabilities picks up new provisioning', (tester) async {
-      final channel = FakeAppLockChannel();
+      final channel = FakeAppLockChannel(
+        capabilities: FakeAppLockChannel.capabilitiesFor(accessibilityEnabled: false),
+      );
       await pumpFreezer(tester, channel: channel);
 
-      expect(find.text('Device owner not set up'), findsOneWidget);
+      expect(find.text('App guard is off'), findsOneWidget);
 
-      // The user has now run the provisioning command.
+      // The user has now turned on the app guard in Android Settings.
       channel.capabilities = FakeAppLockChannel.capabilitiesFor(
-        deviceOwnerActive: true,
         accessibilityEnabled: true,
       );
       await tester.tap(find.text('Re-check'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Launcher hiding active'), findsOneWidget);
+      expect(find.text('App guard active'), findsOneWidget);
     });
   });
 }

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/vault_models.dart';
@@ -59,11 +58,15 @@ class _FreezerScreenState extends State<FreezerScreen> {
 
     final String message;
     if (result.isHard) {
-      message = '${app.label} hidden from the launcher.';
+      message = '${app.label} hidden from your launcher.';
+    } else if (result.isGuarded) {
+      message = '${app.label} is frozen. It stays in your launcher but cannot be opened.';
     } else if (result.method == 'protected') {
       message = '${app.label} is protected and cannot be frozen.';
+    } else if (result.isUnenforced) {
+      message = '${app.label} could not be frozen. Turn on the app guard first.';
     } else {
-      message = '${app.label} could not be hidden. Set up device owner first.';
+      message = '${app.label} could not be frozen.';
     }
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
@@ -193,25 +196,53 @@ class _EnforcementPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = context.read<ChestController>();
     final canHide = capabilities.canHideApps;
+    final guardOn = capabilities.accessibilityEnabled;
+
+    // The phone-only tier is the primary path, so the panel leads with it and
+    // reports it as active on its own terms. Device owner is presented as the
+    // stronger upgrade, not as the thing standing between the user and a
+    // working freeze.
+    final (Color accent, IconData icon, String title, String body) = switch ((
+      canHide,
+      guardOn,
+    )) {
+      (true, _) => (
+          ChestTheme.moss,
+          Icons.visibility_off,
+          'Launcher hiding active',
+          'Frozen apps are removed from your launcher and cannot be started. Their data is kept, '
+              'and they return the moment you release them.',
+        ),
+      (false, true) => (
+          ChestTheme.moss,
+          Icons.shield_moon_outlined,
+          'App guard active',
+          'Frozen apps stay in your launcher but cannot be opened: the app guard covers them and '
+              'returns you home the instant they start. Their data is untouched.',
+        ),
+      (false, false) => (
+          ChestTheme.gold,
+          Icons.shield_outlined,
+          'App guard is off',
+          'Turn on the app guard to freeze apps. It is a one-time switch in Android Settings, on '
+              'this phone, with nothing to install and no computer needed.',
+        ),
+    };
 
     return ChestPanel(
-      accent: canHide ? ChestTheme.moss : ChestTheme.gold,
+      accent: accent,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(
-                canHide ? Icons.visibility_off : Icons.shield_outlined,
-                size: 19,
-                color: canHide ? ChestTheme.moss : ChestTheme.gold,
-              ),
+              Icon(icon, size: 19, color: accent),
               const SizedBox(width: 9),
               Expanded(
                 child: Text(
-                  canHide ? 'Launcher hiding active' : 'Device owner not set up',
+                  title,
                   style: TextStyle(
-                    color: canHide ? ChestTheme.moss : ChestTheme.gold,
+                    color: accent,
                     fontWeight: FontWeight.w700,
                     fontSize: 14,
                   ),
@@ -226,46 +257,50 @@ class _EnforcementPanel extends StatelessWidget {
           ),
           const SizedBox(height: 9),
           Text(
-            canHide
-                ? 'Frozen apps are hidden from your launcher and cannot be started. Their data is kept, and they come back the moment you unfreeze them.'
-                : 'Chest needs to be the device owner before it can hide an app from the launcher. '
-                    'This is a one-time setup that needs a computer and, usually, a freshly reset phone.',
+            body,
             style: const TextStyle(color: ChestTheme.muted, fontSize: 12.5, height: 1.5),
           ),
-          if (!canHide) ...[
+          if (!guardOn) ...[
             const SizedBox(height: 13),
-            _SetupCommand(command: capabilities.provisioningCommand),
+            _GuardSteps(),
+          ],
+          if (capabilities.profileOwnerOnly) ...[
+            const SizedBox(height: 13),
+            const _Note(
+              icon: Icons.info_outline,
+              text: 'Chest manages a work profile on this device. That lets it hide work apps, '
+                  'but not the personal apps in your main launcher. Personal apps are still '
+                  'frozen by the app guard.',
+            ),
           ],
           const SizedBox(height: 13),
           Wrap(
             spacing: 9,
             runSpacing: 9,
             children: [
-              if (!canHide)
+              if (!guardOn)
                 _PanelAction(
-                  icon: Icons.admin_panel_settings_outlined,
-                  label: 'Grant device admin',
+                  icon: Icons.shield_moon_outlined,
+                  label: 'Turn on app guard',
                   emphasised: true,
-                  onPressed: () async {
-                    await controller.appLock.requestDeviceAdmin();
-                    await controller.refreshCapabilities();
-                  },
-                ),
-              if (!capabilities.accessibilityEnabled)
-                _PanelAction(
-                  icon: Icons.accessibility_new,
-                  label: 'Enable app guard',
-                  emphasised: false,
                   onPressed: () async {
                     await controller.appLock.openAccessibilitySettings();
                   },
                 ),
-              if (capabilities.anyEnforcement || canHide)
+              if (guardOn && !capabilities.notificationAccessEnabled)
                 _PanelAction(
-                  icon: Icons.refresh,
-                  label: 'Re-check',
-                  onPressed: controller.refreshCapabilities,
+                  icon: Icons.notifications_off_outlined,
+                  label: 'Hide notifications',
+                  emphasised: false,
+                  onPressed: () async {
+                    await controller.appLock.openNotificationAccessSettings();
+                  },
                 ),
+              _PanelAction(
+                icon: Icons.refresh,
+                label: 'Re-check',
+                onPressed: controller.refreshCapabilities,
+              ),
               if (frozenCount > 0)
                 _PanelAction(
                   icon: Icons.lock_open,
@@ -275,8 +310,8 @@ class _EnforcementPanel extends StatelessWidget {
                     final authorization = await ProtectedReleaseGate.show(
                       context,
                       actionLabel: 'release every app',
-                      detail: 'You are about to put all $frozenCount frozen '
-                          '${frozenCount == 1 ? 'app' : 'apps'} back in your launcher at once.',
+                      detail: 'You are about to unfreeze all $frozenCount frozen '
+                          '${frozenCount == 1 ? 'app' : 'apps'} at once.',
                     );
                     if (authorization == null) return;
                     final restored = await controller.releaseAll(
@@ -294,8 +329,8 @@ class _EnforcementPanel extends StatelessWidget {
                       SnackBar(
                         content: Text(
                           restored == 1
-                              ? '1 app restored to the launcher.'
-                              : '$restored apps restored to the launcher.',
+                              ? '1 app released.'
+                              : '$restored apps released.',
                         ),
                       ),
                     );
@@ -303,63 +338,109 @@ class _EnforcementPanel extends StatelessWidget {
                 ),
             ],
           ),
+          const SizedBox(height: 6),
+          _StrongerTierNote(canHide: canHide),
         ],
       ),
     );
   }
 }
 
-/// Shows the `dpm set-device-owner` command with a copy button.
-class _SetupCommand extends StatelessWidget {
-  const _SetupCommand({required this.command});
-
-  final String command;
+/// The phone-only setup, spelled out as steps rather than a shell command.
+///
+/// This is the whole point of the tier: everything here happens on the device
+/// the app is installed on, with no computer, no cable and no factory reset.
+class _GuardSteps extends StatelessWidget {
+  const _GuardSteps();
 
   @override
   Widget build(BuildContext context) {
+    const steps = [
+      'Open Android Settings.',
+      'Go to Accessibility, then Downloaded apps.',
+      'Choose Chest and turn on the app guard.',
+      'Come back here and tap Re-check.',
+    ];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'Run this once over USB with adb:',
-                style: TextStyle(color: ChestTheme.muted, fontSize: 12),
-              ),
+        for (var i = 0; i < steps.length; i++)
+          Padding(
+            padding: EdgeInsets.only(bottom: i == steps.length - 1 ? 0 : 6),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${i + 1}.',
+                  style: const TextStyle(
+                    color: ChestTheme.gold,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    steps[i],
+                    style: const TextStyle(
+                      color: ChestTheme.muted,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            IconButton(
-              tooltip: 'Copy command',
-              icon: const Icon(Icons.copy_all, size: 16, color: ChestTheme.gold),
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: command));
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Command copied.')),
-                );
-              },
-            ),
-          ],
-        ),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-          decoration: BoxDecoration(
-            color: ChestTheme.obsidian,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(color: ChestTheme.hairline),
           ),
-          child: SelectableText(
-            command,
-            style: ChestTheme.mono.copyWith(fontSize: 11, color: ChestTheme.parchment),
+      ],
+    );
+  }
+}
+
+/// Explains the device-owner upgrade without presenting it as required.
+class _StrongerTierNote extends StatelessWidget {
+  const _StrongerTierNote({required this.canHide});
+
+  final bool canHide;
+
+  @override
+  Widget build(BuildContext context) {
+    if (canHide) {
+      return const _Note(
+        icon: Icons.check_circle_outline,
+        text: 'Chest is the device owner, so freezing removes an app from the launcher entirely. '
+            'This is the strongest freeze Android offers.',
+      );
+    }
+    return const _Note(
+      icon: Icons.upgrade_outlined,
+      text: 'To also remove a frozen app from the launcher, Chest would need to be provisioned as '
+          'device owner. Android only allows that at device setup, from a computer or a QR code, '
+          'and usually after a factory reset. The app guard freezes without any of that.',
+    );
+  }
+}
+
+/// A small icon-and-text note.
+class _Note extends StatelessWidget {
+  const _Note({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 14, color: ChestTheme.muted),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(color: ChestTheme.muted, fontSize: 11.5, height: 1.45),
           ),
-        ),
-        const SizedBox(height: 7),
-        const Text(
-          'The device must have no accounts and no other users, so this usually '
-          'means a factory reset first. Setting up device owner also lets Chest '
-          'wipe the device; Chest never does.',
-          style: TextStyle(color: ChestTheme.muted, fontSize: 11.5, height: 1.45),
         ),
       ],
     );

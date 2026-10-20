@@ -19,9 +19,11 @@ split into four independent subkeys with HKDF, then each file is encrypted with
 AES-256-GCM and again with XChaCha20-Poly1305, with HMAC-SHA256 tags binding the
 header and the envelope.
 
-**Hides other apps.** Chest can remove apps from your launcher entirely, with
-their data intact, and put them back the moment you unfreeze them. Hiding is
-enforced by Android itself and survives a restart — and putting an app back needs
+**Hides other apps.** Chest freezes apps so they cannot be opened, and their data
+stays intact until you release them. Everything it needs is granted on your phone
+— no computer, no cable, no factory reset. On a device where Chest has been made
+device owner it removes the app from your launcher entirely; otherwise it blocks
+the app the moment it opens and hides its notifications. Putting an app back needs
 your passphrase, so it is not undone by whoever picks up the phone next.
 
 **Refuses to talk to the network.** The app requests no network permission at
@@ -82,6 +84,13 @@ Sealed files leave the device only when you move them yourself.
 socket. This is verifiable in `android/app/src/main/AndroidManifest.xml`, where
 `android.permission.INTERNET` is absent.
 
+**The freeze grants are yours to give, on the phone.** Freezing uses two Android
+switches, both granted in Settings on the device itself: the accessibility service
+that blocks a frozen app on open, and notification access that dismisses its
+notifications. Neither involves a computer, and both can be revoked the same way.
+`QUERY_ALL_PACKAGES` is requested so the Freezer can list what is installed; it
+reads package names and labels only.
+
 **Biometrics are not a key.** The fingerprint prompt is a convenience that saves
 retyping. The vault key still comes from the passphrase. Biometric APIs can be
 defeated on a rooted device, so treating a fingerprint as the protection would
@@ -122,52 +131,73 @@ to restore.
 
 ## Hiding apps
 
-Chest removes a frozen app from your launcher using
-`DevicePolicyManager.setApplicationHidden`. The app cannot be started, its data
-is left untouched, and it returns to the launcher the moment you unfreeze it. The
-platform enforces this, so it holds across a reboot whether or not Chest is
-running.
+Freezing an app keeps it shut and keeps its data. Everything needed to do that is
+granted **on the phone Chest is installed on** — no computer, no cable, no factory
+reset. There are two enforcement tiers, and the Freezer screen always says which
+one is in force.
 
-### Why Chest asks to be device owner
+### Tier 1: the app guard (works on any phone)
 
-`setApplicationHidden` only works for a **device owner or profile owner**. Legacy
-device-admin rights are not enough, and this is a hard platform rule rather than a
-choice Chest makes:
+Turning on Chest's accessibility service — one switch in Android Settings, on the
+device — enables real enforcement with nothing else required:
+
+- **Blocks the app on open.** When a frozen app comes to the foreground, Chest
+  covers the screen with an opaque overlay and returns you home. The overlay is
+  the load-bearing part: the home transition takes a few frames, and without it
+  the frozen app is briefly readable.
+- **Dismisses its notifications.** A freeze that still lets a messenger buzz and
+  print message text on the lock screen has not hidden anything worth hiding, so
+  notifications from frozen apps are cancelled as they arrive. This is a separate
+  Android grant, offered in the panel once the guard is on.
+
+This is the default path and the one the UI leads with.
+
+### Tier 2: launcher hiding (device owner)
+
+The only way Android will actually remove an icon from the launcher is
+`DevicePolicyManager.setApplicationHidden`, which the platform permits **only for
+a device owner or profile owner**. Legacy device-admin rights are not enough, and
+this is a hard platform rule rather than a choice Chest makes:
 
 > For legacy device admins, this API throws `SecurityException` if they target SDK
 > level `N` or above.
 > — [Android `DevicePolicyManager` reference](https://developer.android.com/reference/android/app/admin/DevicePolicyManager#setApplicationHidden(android.content.ComponentName,%20java.lang.String,%20boolean))
 
-Chest targets a modern SDK, so a device-admin-only build could never hide
-anything. Provisioning is a one-time step run from a computer:
+Chest treats this as an optional upgrade, not a requirement, because provisioning
+a device owner cannot be done from the phone alone:
 
 ```bash
 adb shell dpm set-device-owner com.chest.chest/.applock.ChestDeviceAdminReceiver
 ```
 
-The Freezer screen shows this command with a copy button whenever Chest is not yet
-the device owner.
-
 `dpm set-device-owner` only succeeds when the device has **no accounts and no
-secondary users**, which in practice means a freshly factory-reset phone. It is a
-development and testing tool, not a production deployment path. Real deployments
-provision a device owner through an EMM at enrolment time.
+secondary users**, which in practice means a freshly factory-reset phone, and it
+has to be run from a computer over USB (or provisioned by an EMM at enrolment).
+That is why Chest does not gate freezing behind it. When Chest *is* the device
+owner, freezing removes the app from the launcher entirely and the panel says so.
+
+A **profile owner** is deliberately not treated as equivalent: it governs a
+separate work profile, so it can hide work apps but not the personal apps in your
+main launcher. Counting it would promise a hide on exactly the apps it cannot
+perform one on, so the panel explains the limitation instead.
 
 ### Being honest about what is enforced
 
-Freezing has two tiers, and the UI always says which one is in force:
+- **Launcher hiding active** — Chest is device owner. The app leaves the launcher
+  and cannot be started.
+- **App guard active** — the app stays in your launcher but is blocked the moment
+  it opens, and its notifications are dismissed.
+- **App guard is off** — nothing can enforce a freeze yet, so the panel offers the
+  on-device setup steps.
 
-- **Hidden (device owner).** The app leaves the launcher and cannot be started.
-- **Guard only (no device owner).** Chest cannot hide anything, so it falls back
-  to an accessibility service that sends you home when the frozen app opens. The
-  app is still in your launcher and still launchable by other means, so this is a
-  speed bump rather than a lock.
-
-Chest never marks an app frozen when the platform refused the hide. A switch that
-claimed otherwise would tell you an app was hidden while it sat in your launcher.
+Chest never marks an app frozen when nothing can enforce it. A switch that claimed
+otherwise would tell you an app was contained while it opened normally. For the
+same reason a freeze is only recorded when either the platform hid the app or the
+guard is running to block it.
 
 The accessibility service compares package names only. It is not declared to read
-window content, so it cannot see what is on your screen.
+window content — `canRetrieveWindowContent="false"` — so it is technically
+incapable of seeing what is on your screen.
 
 ### Not getting locked out
 
@@ -259,8 +289,9 @@ lib/
 android/app/src/main/kotlin/com/chest/chest/
   MainActivity.kt                Method-channel bridge
   applock/ChestAppLockManager.kt Hide/unhide via DevicePolicyManager
-  applock/ChestAppLockService.kt Accessibility guard service
-  applock/ChestAppLockStore.kt   Persisted hidden set and cached labels
+  applock/ChestAppLockService.kt Accessibility guard: overlay block and home
+  applock/ChestNotificationGuard.kt Dismisses notifications from frozen apps
+  applock/ChestAppLockStore.kt   Persisted frozen set and cached labels
   applock/ChestBootReceiver.kt   Re-applies hidden state after a reboot
 ```
 
@@ -289,15 +320,17 @@ container length does not reveal the exact size of what you stored.
 ```bash
 flutter pub get
 flutter analyze          # expect: no issues
-flutter test             # expect: 94 tests pass
+flutter test             # expect: 108 tests pass
 flutter build apk --release
 ```
 
 The Android layer needs no extra setup to compile: the device-admin receiver, the
-accessibility service and the boot receiver are all declared in the manifest and
-bind only after the user approves them through the system dialogs.
+accessibility service, the notification guard and the boot receiver are all
+declared in the manifest and bind only after the user approves them through the
+system dialogs, on the phone itself.
 
-Hiding apps additionally needs Chest provisioned as device owner. See
+Freezing works on any phone with no provisioning. The optional launcher-hiding
+tier additionally needs Chest provisioned as device owner. See
 [Hiding apps](#hiding-apps) for the command.
 
 ### Building an APK in CI
@@ -408,14 +441,21 @@ failures throttle the gate, and that freezing is never gated.
 
 - **Android only for freezing.** The freeze features are Android-specific. The
   vault itself is platform-independent Dart and runs anywhere Flutter does.
-- **Hiding needs device-owner provisioning.** Without it, Chest cannot hide an app
-  from the launcher at all and falls back to the guard service, which can be
-  bypassed by disabling the accessibility service. Chest says so in the UI rather
-  than implying a hide happened.
+- **Launcher hiding needs device-owner provisioning.** Android only lets a device
+  owner remove an app's launcher icon, and provisioning it needs a computer and
+  usually a factory reset. Without it Chest uses the app guard, which blocks a
+  frozen app on open but leaves its icon in place. Chest says which tier is in
+  force rather than implying a hide happened.
+- **The app guard can be switched off.** It is an accessibility service, so anyone
+  who can reach Android Settings can disable it, which lifts the block until it is
+  re-enabled. There is no phone-only way around this; it is a limit of the
+  platform, not of the app guard.
 - **Device owner is a powerful role.** Provisioning grants Chest the ability to
   wipe the device. Chest never calls it, but the capability comes with the role.
 - **Provisioning needs a reset phone.** `dpm set-device-owner` requires no accounts
-  and no secondary users, so it usually means a factory reset first.
+  and no secondary users, so it usually means a factory reset first, from a
+  computer. It is an optional upgrade for the launcher-hiding tier, not a
+  prerequisite for freezing.
 - **Hidden system apps can be refused.** Some OEM builds reject hiding preinstalled
   packages; Chest reports the refusal instead of pretending it worked.
 - **No key wrapping in hardware.** The probe reports what the device offers; it

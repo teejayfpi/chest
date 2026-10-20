@@ -392,13 +392,15 @@ class _BuilderCredit extends StatelessWidget {
         children: [
           Row(
             children: [
-              Container(
-                padding: const EdgeInsets.all(9),
-                decoration: BoxDecoration(
-                  color: ChestTheme.gold.withValues(alpha: 0.09),
-                  borderRadius: BorderRadius.circular(10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset(
+                  'assets/branding/chest_logo.png',
+                  width: 38,
+                  height: 38,
+                  filterQuality: FilterQuality.medium,
+                  semanticLabel: 'Chest logo',
                 ),
-                child: const Icon(Icons.person_outline, size: 19, color: ChestTheme.gold),
               ),
               const SizedBox(width: 13),
               const Expanded(

@@ -320,7 +320,7 @@ container length does not reveal the exact size of what you stored.
 ```bash
 flutter pub get
 flutter analyze          # expect: no issues
-flutter test             # expect: 108 tests pass
+flutter test             # expect: 112 tests pass
 flutter build apk --release
 ```
 

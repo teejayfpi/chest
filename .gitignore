@@ -49,3 +49,6 @@ app.*.map.json
 
 # Kotlin compiler session state
 android/.kotlin/
+
+# Gradle build reports
+android/build/

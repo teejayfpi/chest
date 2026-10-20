@@ -32,6 +32,18 @@ flutter test               # 94 tests
 flutter build apk --release
 ```
 
+## CI
+
+`.github/workflows/build-apk.yml` runs analyze, test, then a fat APK build and a
+`--split-per-abi` build, uploading both as artifacts. Verify workflow edits with
+`actionlint`, and keep the pinned `FLUTTER_VERSION` in the workflow in step with
+the version the project is developed against — a mismatch shows up as
+widget-test failures that do not reproduce locally.
+
+The release APK is debug-signed unless `android/key.properties` exists. CI writes
+that file from repository secrets when `KEYSTORE_BASE64` is set and skips it
+otherwise, so forks build without any signing configuration.
+
 ## Hiding apps is device-owner only
 
 `DevicePolicyManager.setApplicationHidden` is restricted to a **device owner or

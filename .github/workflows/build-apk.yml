@@ -1,0 +1,136 @@
+name: Build APK
+
+# Builds every pull request, every push to main, and a manual button for
+# building any branch on demand. A push to a version tag additionally publishes
+# the APKs as a release. Branch pushes are covered by the pull_request trigger,
+# so a branch with an open PR does not build twice.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run, so a quick series of
+# commits does not queue up half a dozen APK builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so the CI toolchain matches the one this project is developed
+  # against. Bumping Flutter is a deliberate commit, not a surprise.
+  FLUTTER_VERSION: '3.47.7'
+  JAVA_VERSION: '21'
+
+jobs:
+  build:
+    name: Analyze, test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Read at job level so the signing step's `if` can see it. Empty when the
+      # repository has no signing secrets, which is the expected state for a fork.
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          java -version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # Optional. When the four signing secrets are set, the release APK is
+      # signed with a real key; when they are not, Gradle falls back to the
+      # debug key and the build still succeeds. The debug key is fine for
+      # sideloading and unfit for distribution, so the step announces which one
+      # it used rather than leaving you to guess.
+      - name: Set up release signing
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/chest-release.jks
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=chest-release.jks
+          EOF
+
+      - name: Report signing mode
+        run: |
+          if [ -f android/key.properties ]; then
+            echo "Signing with the release keystore from repository secrets."
+          else
+            echo "::warning::No signing secrets set. The release APK is signed with the debug key and is not fit for distribution."
+          fi
+
+      # Failing here means the build never starts, so no APK is published from
+      # code that does not compile or pass tests.
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build fat release APK
+        run: flutter build apk --release
+
+      # The fat APK bundles armeabi-v7a, arm64-v8a and x86_64, which is most of
+      # its size. Split builds let someone download only their phone's ABI.
+      - name: Build per-ABI release APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Upload fat APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: chest-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload per-ABI APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: chest-release-apks-per-abi
+          path: build/app/outputs/flutter-apk/app-*-release.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    # Only on a version tag, and only if the build job succeeded.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the built APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: chest-release-apks-per-abi
+          path: apks
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apks/*.apk
+          generate_release_notes: true
+          fail_on_unmatched_files: true

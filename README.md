@@ -269,6 +269,65 @@ bind only after the user approves them through the system dialogs.
 Hiding apps additionally needs Chest provisioned as device owner. See
 [Hiding apps](#hiding-apps) for the command.
 
+### Building an APK in CI
+
+`.github/workflows/build-apk.yml` builds the APK on GitHub's runners, so you do
+not need Flutter installed to get an installable build.
+
+It runs on every pull request, on every push to `main`, and on demand from the
+**Actions → Build APK → Run workflow** button. `flutter analyze` and
+`flutter test` run before the build, so no APK is produced from code that does not
+compile or pass its tests.
+
+Two artifacts come out of each run:
+
+| Artifact | Contents |
+| --- | --- |
+| `chest-release-apk` | One fat APK with all three ABIs. Largest, works on anything. |
+| `chest-release-apks-per-abi` | One APK per ABI. `arm64-v8a` is the one most phones need. |
+
+Download them from the **Artifacts** section at the bottom of a run's summary
+page. Artifacts are retained for 90 days by default and require a GitHub login to
+download, even on a public repository.
+
+Pushing a tag like `v1.0.0` additionally publishes the per-ABI APKs to **Releases**,
+which is the link to hand out for a public build.
+
+**The APKs are debug-signed by default, and debug-signed APKs are not fit for
+distribution.** That is fine for sideloading onto your own phone, but anyone
+holding the well-known AOSP debug key could sign an update Android would accept as
+coming from you. To sign properly, generate a keystore and add four repository
+secrets:
+
+```bash
+keytool -genkeypair -v -keystore chest-release.jks \
+  -keyalg RSA -keysize 2048 -validity 10000 -alias chest
+base64 -w0 chest-release.jks   # paste the output into KEYSTORE_BASE64
+```
+
+| Secret | Value |
+| --- | --- |
+| `KEYSTORE_BASE64` | base64 of the `.jks` file |
+| `KEYSTORE_PASSWORD` | the store password |
+| `KEY_PASSWORD` | the key password |
+| `KEY_ALIAS` | `chest` |
+
+Add these under **Settings → Secrets and variables → Actions**. When they are
+present the workflow signs with your key and says so in the log; when they are
+absent it warns and falls back to the debug key rather than failing. Keep the
+keystore itself out of the repository — losing it means you can never update an
+installed app in place, and leaking it means someone else can.
+
+Locally, real signing works the same way through `android/key.properties`, which
+is gitignored:
+
+```properties
+storePassword=...
+keyPassword=...
+keyAlias=chest
+storeFile=/absolute/path/to/chest-release.jks
+```
+
 ### Brand assets
 
 Launcher icons and the logo are generated rather than hand-drawn:

@@ -16,7 +16,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Re-applies hidden state after a reboot or an app update. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- Required to list installed apps so the user can choose what to hide. -->
+    <!--
+      Required to list installed apps so the user can choose what to hide.
+      Also covers the WhatsApp deep link: on API 30+ an app cannot see another
+      package unless it declares an interest, so without this entry the contact
+      button would report WhatsApp as missing on a phone that has it.
+    -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
@@ -101,6 +106,23 @@
                 android:resource="@xml/chest_accessibility_service" />
         </service>
 
+        <!--
+          Publishes a decrypted file to whatever app the user picks, so a sealed
+          photo can be saved back to the gallery or sent on without Chest ever
+          writing plaintext somewhere another app can stumble across. The paths
+          file restricts it to Chest's own cache directory.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.chest.files"
+            android:exported="false"
+            android:grantUriPermissions="true"
+            android:label="@string/file_provider_label">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/chest_file_paths" />
+        </provider>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
@@ -119,5 +141,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
+        <!-- Lets Chest see whether WhatsApp is installed before offering it. -->
+        <package android:name="com.whatsapp" />
     </queries>
 </manifest>

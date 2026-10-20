@@ -10,9 +10,12 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.view.WindowManager
+import androidx.activity.result.ActivityResultLauncher
 import com.chest.chest.applock.ChestAppLockManager
 import com.chest.chest.applock.ChestDeviceAdminReceiver
-import io.flutter.embedding.android.FlutterActivity
+import com.chest.chest.files.ChestFilePicker
+import com.chest.chest.files.ChestFileSealer
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.security.KeyStore
@@ -23,22 +26,72 @@ import javax.crypto.SecretKeyFactory
 /**
  * Host activity and the single bridge between Dart and the Android platform.
  *
- * Only two capabilities need native code, and both are things Dart genuinely
- * cannot do:
+ * Only three capabilities need native code, and each is something Dart
+ * genuinely cannot do:
  *
  *  - **App freezing**, which depends on [DevicePolicyManager] and an
  *    accessibility service.
  *  - **Hardware security reporting**, so the UI can tell the user whether the
  *    vault's key material is held in a TEE or a discrete security chip rather
  *    than merely claiming "hardware-backed".
+ *  - **File handling**, which needs a Storage Access Framework grant the user
+ *    approves and a delete of the original once the vault holds a sealed copy.
  *
  * All cryptography stays in Dart, which keeps the cipher cascade auditable in
  * one language and testable with plain `flutter test`.
+ *
+ * The base class is [FlutterFragmentActivity] rather than `FlutterActivity`
+ * because the file picker needs `registerForActivityResult`, which lives on
+ * `ComponentActivity`. `FlutterActivity` extends a plain `Activity` and cannot
+ * host an activity-result launcher.
  */
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
 
     private val appLockChannel = "com.chest.chest/app_lock"
     private val securityChannel = "com.chest.chest/security"
+    private val filesChannel = "com.chest.chest/files"
+
+    /**
+     * The picker result, parked until the picker closes.
+     *
+     * A method channel call cannot span the time the user spends in the system
+     * picker, so `pickFiles` launches the picker and returns without completing
+     * its result. The `MethodChannel.Result` is held here and completed from the
+     * activity-result callback once the user is done, so the Dart `await` simply
+     * stays pending until then. Flutter re-attaches the engine after the picker
+     * closes, which is why the pending result has to survive the activity being
+     * paused and resumed.
+     */
+    private var pendingPick: PendingPick? = null
+
+    private var pickLauncher: ActivityResultLauncher<Intent>? = null
+
+    private data class PendingPick(val result: MethodChannel.Result)
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Must be registered before the activity starts, which is why it lives
+        // here rather than in configureFlutterEngine.
+        pickLauncher = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+        ) { activityResult ->
+            val pending = pendingPick ?: return@registerForActivityResult
+            pendingPick = null
+            if (activityResult.resultCode != RESULT_OK || activityResult.data == null) {
+                pending.result.success(emptyList<Map<String, Any>>())
+                return@registerForActivityResult
+            }
+            val data = activityResult.data!!
+            val uris = ChestFilePicker.urisFrom(data)
+            // Persist the grant for each file so the delete after sealing is
+            // permitted, then describe it for the UI.
+            val described = uris.map { uri ->
+                ChestFilePicker.takeGrant(this, uri)
+                ChestFilePicker.describe(this, uri)
+            }
+            pending.result.success(described)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -111,7 +164,122 @@ class MainActivity : FlutterActivity() {
                     result.error("security_probe_failure", e.message, null)
                 }
             }
+
+        // File sealing and the outbound hand-offs. Kept on its own channel
+        // because it needs the activity to launch intents, while the work
+        // itself is a content-provider operation.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, filesChannel)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "pickFiles" -> {
+                            // The result is completed later, when the picker
+                            // closes, so Dart simply awaits the call.
+                            val launcher = pickLauncher
+                            if (launcher == null) {
+                                result.error("no_launcher", "picker unavailable", null)
+                            } else {
+                                pendingPick = PendingPick(result)
+                                try {
+                                    launcher.launch(ChestFilePicker.buildPickIntent())
+                                } catch (e: Exception) {
+                                    pendingPick = null
+                                    result.error("picker_failed", e.message, null)
+                                }
+                            }
+                        }
+                        "readPickedFile" -> {
+                            val raw = call.argument<String>("uri")
+                            val maxBytes = call.argument<Number>("maxBytes")?.toLong()
+                                ?: DEFAULT_MAX_PICK_BYTES
+                            if (raw.isNullOrEmpty()) {
+                                result.error("invalid_argument", "uri is required", null)
+                            } else {
+                                val bytes = ChestFilePicker.readBytes(this, Uri.parse(raw), maxBytes)
+                                if (bytes == null) {
+                                    result.error(
+                                        "read_failed",
+                                        ChestFilePicker.error ?: "unreadable",
+                                        null,
+                                    )
+                                } else {
+                                    result.success(bytes)
+                                }
+                            }
+                        }
+                        "releaseSource" -> {
+                            val raw = call.argument<String>("uri")
+                            if (!raw.isNullOrEmpty()) {
+                                ChestFilePicker.releaseGrant(this, Uri.parse(raw))
+                            }
+                            result.success(true)
+                        }
+                        "deleteSource" -> {
+                            val raw = call.argument<String>("uri")
+                            if (raw.isNullOrEmpty()) {
+                                result.error("invalid_argument", "uri is required", null)
+                            } else {
+                                val outcome = ChestFileSealer.deleteSource(this, Uri.parse(raw))
+                                result.success(
+                                    mapOf(
+                                        "removed" to outcome.removed,
+                                        "reason" to outcome.reason,
+                                    ),
+                                )
+                            }
+                        }
+                        "shareFile" -> {
+                            val path = call.argument<String>("path")
+                            val mime = call.argument<String>("mimeType") ?: "application/octet-stream"
+                            if (path.isNullOrEmpty()) {
+                                result.error("invalid_argument", "path is required", null)
+                            } else {
+                                val file = java.io.File(path)
+                                if (!file.exists()) {
+                                    result.error("missing_file", "nothing to share", null)
+                                } else {
+                                    startActivity(
+                                        ChestFileSealer.shareIntent(
+                                            this,
+                                            file,
+                                            mime,
+                                            getString(R.string.share_file_title),
+                                        ),
+                                    )
+                                    result.success(true)
+                                }
+                            }
+                        }
+                        "openWhatsApp" -> {
+                            val phone = call.argument<String>("phone") ?: ""
+                            // Two things can stop this working, and both are
+                            // reported rather than papered over. Opening a
+                            // browser fallback would be a network call made on
+                            // the user's behalf, which this app does not do.
+                            when {
+                                !digitsPresent(phone) -> result.success(
+                                    mapOf("opened" to false, "reason" to "no_phone_number"),
+                                )
+                                packageManager.getLaunchIntentForPackage(WHATSAPP_PACKAGE) == null ->
+                                    result.success(
+                                        mapOf("opened" to false, "reason" to "whatsapp_not_installed"),
+                                    )
+                                else -> {
+                                    startActivity(ChestFileSealer.whatsappIntent(phone))
+                                    result.success(mapOf("opened" to true, "reason" to null))
+                                }
+                            }
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (e: Exception) {
+                    result.error("files_failure", e.message, null)
+                }
+            }
     }
+
+    /** True when [phone] has enough digits to form a usable wa.me link. */
+    private fun digitsPresent(phone: String): Boolean = phone.count { it.isDigit() } >= 7
 
     /** Runs [body] with the required `packageName` argument, or fails the call. */
     private inline fun withPackage(
@@ -227,5 +395,17 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        const val WHATSAPP_PACKAGE = "com.whatsapp"
+
+        /**
+         * Ceiling on a file read into memory for sealing.
+         *
+         * The bytes are held in memory because a cache file would be a
+         * plaintext copy outside the vault, so this bound is what stops a
+         * multi-gigabyte video from exhausting the heap. It is a hard refusal,
+         * not a truncation: sealing part of a file would produce a vault entry
+         * that silently decrypts to corrupt data.
+         */
+        const val DEFAULT_MAX_PICK_BYTES = 256L * 1024L * 1024L
     }
 }

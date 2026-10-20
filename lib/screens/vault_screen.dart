@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -27,35 +26,126 @@ class _VaultScreenState extends State<VaultScreen> {
     super.dispose();
   }
 
-  /// Picks files and seals each one.
+  /// Picks files, seals them, then removes the originals.
   ///
-  /// The picker is allowed multiple selections so a user can drop in a batch;
-  /// each file is encrypted independently, which means one failure does not
-  /// abandon the rest of the batch.
+  /// The picker allows multiple selections so a user can drop in a batch; each
+  /// file is encrypted independently, so one failure does not abandon the rest.
+  /// Sealing happens before deletion, and the result is reported honestly: a
+  /// file that is in the vault but whose original could not be removed is
+  /// called out rather than counted as hidden.
   Future<void> _importFiles() async {
     final controller = context.read<ChestController>();
     final messenger = ScaffoldMessenger.of(context);
 
-    final files = await FilePicker.pickFiles();
-    if (files.isEmpty) return;
+    final picks = await controller.pickFilesToHide();
+    if (picks.isEmpty) return;
 
-    var sealed = 0;
-    for (final file in files) {
-      final Uint8List bytes;
-      try {
-        bytes = await file.readAsBytes();
-      } catch (_) {
-        continue;
-      }
-      final entry = await controller.addFile(name: file.name, data: bytes);
-      if (entry != null) sealed++;
+    final summary = await controller.hidePickedFiles(picks);
+    if (!mounted) return;
+
+    if (summary.didNothing && summary.failures.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Nothing was sealed.')),
+      );
+      return;
     }
 
     messenger.showSnackBar(
-      SnackBar(
-        content: Text(sealed == 1
-            ? 'Sealed 1 file into the chest.'
-            : 'Sealed $sealed files into the chest.'),
+      SnackBar(content: Text(_describeHide(summary))),
+    );
+
+    if (summary.stillVisible.isNotEmpty || summary.failures.isNotEmpty) {
+      await _explainPartialHide(summary);
+    }
+  }
+
+  /// One sentence that says exactly how much was hidden.
+  static String _describeHide(HideSummary summary) {
+    if (summary.sealed == 0) {
+      return summary.failures.isEmpty
+          ? 'Nothing was sealed.'
+          : 'Nothing could be sealed.';
+    }
+    final sealed = summary.sealed == 1 ? '1 file' : '${summary.sealed} files';
+    if (summary.hidden == summary.sealed) {
+      return 'Hid $sealed. The originals are gone from your device.';
+    }
+    return 'Sealed $sealed, and removed ${summary.hidden} of them.';
+  }
+
+  /// Explains the difference between "sealed" and "hidden" when they diverge.
+  ///
+  /// This dialog exists because the distinction matters and is easy to misread:
+  /// the bytes are safe either way, but a file whose original survived is still
+  /// in the user's gallery and still visible to other apps.
+  Future<void> _explainPartialHide(HideSummary summary) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Some files are still visible'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'These files are sealed in the chest, but Chest could not '
+                'remove the original from your device, so a copy is still in '
+                'your gallery or file manager.',
+                style: TextStyle(color: ChestTheme.muted, fontSize: 13, height: 1.45),
+              ),
+              const SizedBox(height: 12),
+              for (final name in summary.stillVisible)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.visibility_outlined, size: 15, color: ChestTheme.gold),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: const TextStyle(color: ChestTheme.parchment, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (summary.failures.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                const Text(
+                  'Could not be sealed at all:',
+                  style: TextStyle(color: ChestTheme.muted, fontSize: 13),
+                ),
+                const SizedBox(height: 6),
+                for (final failure in summary.failures)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.error_outline, size: 15, color: ChestTheme.ember),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            failure,
+                            style: const TextStyle(color: ChestTheme.parchment, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Understood'),
+          ),
+        ],
       ),
     );
   }
@@ -120,10 +210,12 @@ class _VaultScreenState extends State<VaultScreen> {
     );
   }
 
-  /// Decrypts an entry and shows it, with an explicit copy action.
+  /// Decrypts an entry and shows it, with explicit actions.
   ///
   /// The plaintext is never written to disk or to the clipboard automatically;
-  /// the user has to ask, and the buffer is shown in a dialog they close.
+  /// the user has to ask. Images are previewed in the dialog because a hex dump
+  /// is useless for a photo, and any entry can be handed to another app to save
+  /// or send.
   Future<void> _openEntry(VaultEntry entry) async {
     final controller = context.read<ChestController>();
     final messenger = ScaffoldMessenger.of(context);
@@ -136,6 +228,8 @@ class _VaultScreenState extends State<VaultScreen> {
       );
       return;
     }
+
+    final isImage = _isImage(entry.originalExtension);
 
     await showDialog<void>(
       context: context,
@@ -153,27 +247,59 @@ class _VaultScreenState extends State<VaultScreen> {
                   style: const TextStyle(color: ChestTheme.muted, fontSize: 12),
                 ),
                 const SizedBox(height: 14),
-                SelectableText(
-                  _previewOf(data, entry.originalExtension),
-                  style: ChestTheme.mono.copyWith(color: ChestTheme.parchment),
-                ),
+                if (isImage)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.memory(
+                      data,
+                      fit: BoxFit.contain,
+                      // A file that is not really an image should not take the
+                      // dialog down with it.
+                      errorBuilder: (_, _, _) => const Text(
+                        'This file is sealed, but it is not a readable image.',
+                        style: TextStyle(color: ChestTheme.muted, fontSize: 13),
+                      ),
+                    ),
+                  )
+                else
+                  SelectableText(
+                    _previewOf(data, entry.originalExtension),
+                    style: ChestTheme.mono.copyWith(color: ChestTheme.parchment),
+                  ),
               ],
             ),
           ),
         ),
         actions: [
+          if (!isImage)
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(
+                  ClipboardData(text: _previewOf(data, entry.originalExtension)),
+                );
+                if (dialogContext.mounted) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(content: Text('Copied to the clipboard.')),
+                  );
+                }
+              },
+              child: const Text('Copy'),
+            ),
           TextButton(
             onPressed: () async {
-              await Clipboard.setData(
-                ClipboardData(text: _previewOf(data, entry.originalExtension)),
+              final saved = await controller.exportFile(entry);
+              if (!dialogContext.mounted) return;
+              ScaffoldMessenger.of(dialogContext).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    saved
+                        ? 'Choose where to save or send it.'
+                        : 'Could not prepare that file.',
+                  ),
+                ),
               );
-              if (dialogContext.mounted) {
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  const SnackBar(content: Text('Copied to the clipboard.')),
-                );
-              }
             },
-            child: const Text('Copy'),
+            child: const Text('Save to device'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext),
@@ -182,6 +308,16 @@ class _VaultScreenState extends State<VaultScreen> {
         ],
       ),
     );
+  }
+
+  /// True when [extension] names an image Flutter can render directly.
+  ///
+  /// HEIC is deliberately excluded: Android cannot decode it through
+  /// `Image.memory`, so it falls back to the byte preview instead of showing a
+  /// broken frame.
+  static bool _isImage(String extension) {
+    const images = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'};
+    return images.contains(extension.toLowerCase());
   }
 
   Future<void> _confirmDelete(VaultEntry entry) async {
@@ -268,12 +404,12 @@ class _VaultScreenState extends State<VaultScreen> {
           const SizedBox(height: 12),
           FloatingActionButton.extended(
             heroTag: 'import',
-            tooltip: 'Seal files',
+            tooltip: 'Hide files',
             backgroundColor: ChestTheme.gold,
             foregroundColor: ChestTheme.obsidian,
             onPressed: controller.busy ? null : _importFiles,
-            icon: const Icon(Icons.add),
-            label: const Text('Seal files'),
+            icon: const Icon(Icons.visibility_off_outlined),
+            label: const Text('Hide files'),
           ),
         ],
       ),

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../core/vault_service.dart';
 import '../crypto/crypto_primitives.dart';
@@ -9,6 +11,7 @@ import '../crypto/key_derivation.dart';
 import '../models/vault_models.dart';
 import '../platform/app_lock_bridge.dart';
 import '../platform/biometric_service.dart';
+import '../platform/chest_files_bridge.dart';
 
 /// Top-level screens the app can be showing.
 enum ChestRoute { onboarding, unlock, vault, freezer, settings }
@@ -49,6 +52,38 @@ class ReleaseAuthorizationResult {
   bool get authorized => decision == ReleaseDecision.authorized;
 }
 
+/// What happened when a batch of picked files was sealed and hidden.
+///
+/// [sealed] and [hidden] are counted separately because they can differ: a file
+/// can be safely in the vault while its original is still visible in the
+/// gallery, and the UI must not report that as fully hidden.
+class HideSummary {
+  const HideSummary({
+    required this.sealed,
+    required this.hidden,
+    required this.stillVisible,
+    required this.failures,
+  });
+
+  /// Files now sealed in the vault.
+  final int sealed;
+
+  /// Files whose original was also removed from the device.
+  final int hidden;
+
+  /// Names of files sealed but whose original could not be removed.
+  final List<String> stillVisible;
+
+  /// Per-file failures, already phrased for display.
+  final List<String> failures;
+
+  /// True when every file was both sealed and removed.
+  bool get fullyHidden => sealed > 0 && stillVisible.isEmpty && failures.isEmpty;
+
+  /// True when the batch changed nothing at all.
+  bool get didNothing => sealed == 0 && failures.isEmpty;
+}
+
 /// Single source of truth for the UI.
 ///
 /// Holds the unlocked [VaultSession] and mediates every call into the crypto
@@ -61,10 +96,12 @@ class ChestController extends ChangeNotifier {
     AppLockBridge? appLock,
     SecurityBridge? security,
     BiometricService? biometrics,
+    ChestFilesBridge? files,
   })  : vault = vaultService ?? VaultService(),
         appLock = appLock ?? AppLockBridge(),
         security = security ?? SecurityBridge(),
-        biometrics = biometrics ?? BiometricService();
+        biometrics = biometrics ?? BiometricService(),
+        files = files ?? ChestFilesBridge();
 
   /// Vault storage and crypto entry point.
   final VaultService vault;
@@ -77,6 +114,9 @@ class ChestController extends ChangeNotifier {
 
   /// Biometric prompt wrapper.
   final BiometricService biometrics;
+
+  /// Native file picker, reader and original-remover.
+  final ChestFilesBridge files;
 
   ChestRoute _route = ChestRoute.onboarding;
   ChestRoute get route => _route;
@@ -435,6 +475,167 @@ class ChestController extends ChangeNotifier {
       _error = _describe(e);
       notifyListeners();
       return null;
+    }
+  }
+
+  /// Opens the system picker and returns what the user chose.
+  ///
+  /// An empty list means they cancelled. The picker's grant is held so the
+  /// original can be removed after sealing; [hidePickedFiles] does that, and
+  /// [discardPicks] drops the grant when the user backs out.
+  Future<List<PickedFile>> pickFilesToHide() async {
+    if (_session == null) {
+      _error = 'The vault is locked.';
+      notifyListeners();
+      return const [];
+    }
+    try {
+      return await files.pickFiles();
+    } on ChestFileException catch (e) {
+      _error = e.message;
+      notifyListeners();
+      return const [];
+    }
+  }
+
+  /// Drops the picker's grants for files the user chose not to seal.
+  Future<void> discardPicks(List<PickedFile> picks) async {
+    for (final pick in picks) {
+      await files.releaseSource(pick.uri);
+    }
+  }
+
+  /// Seals each picked file, then removes the original.
+  ///
+  /// The order is deliberate: bytes are read and sealed first, and the original
+  /// is only deleted once the vault confirms it holds the sealed copy. If
+  /// sealing fails, the original is left untouched, so a failure can lose
+  /// nothing. If the delete fails, the entry is kept and reported as still
+  /// visible rather than being rolled back, because the user's data is safer in
+  /// the vault than in a half-completed state.
+  Future<HideSummary> hidePickedFiles(List<PickedFile> picks) async {
+    if (_session == null) {
+      _error = 'The vault is locked.';
+      notifyListeners();
+      return const HideSummary(sealed: 0, hidden: 0, stillVisible: [], failures: []);
+    }
+    _setBusy(true);
+    _error = null;
+    var sealedCount = 0;
+    var hiddenCount = 0;
+    final stillVisible = <String>[];
+    final failures = <String>[];
+
+    try {
+      for (final pick in picks) {
+        try {
+          final data = await files.readPickedFile(pick.uri);
+          await vault.addFile(session: _session!, name: pick.name, data: data);
+          sealedCount++;
+
+          // Only now is it safe to destroy the original.
+          final removed = await files.deleteSource(pick.uri);
+          if (removed) {
+            hiddenCount++;
+          } else {
+            stillVisible.add(pick.name);
+          }
+          await files.releaseSource(pick.uri);
+          await refreshEntries();
+        } on ChestFileException catch (e) {
+          failures.add('${pick.name}: ${e.message}');
+          await files.releaseSource(pick.uri);
+        } catch (e) {
+          failures.add('${pick.name}: ${_describe(e)}');
+          await files.releaseSource(pick.uri);
+        }
+      }
+      return HideSummary(
+        sealed: sealedCount,
+        hidden: hiddenCount,
+        stillVisible: stillVisible,
+        failures: failures,
+      );
+    } finally {
+      _setBusy(false);
+      notifyListeners();
+    }
+  }
+
+  /// Writes [entry] to a cache file and opens a chooser so the user can save or
+  /// send the decrypted copy.
+  ///
+  /// This is how a sealed photo gets back to the gallery: Chest cannot write to
+  /// shared storage itself (it holds no storage permission and asks for none),
+  /// so it hands the bytes to whichever app the user picks. The cache file is
+  /// deleted as soon as the chooser returns, so the plaintext does not outlive
+  /// the action.
+  Future<bool> exportFile(VaultEntry entry) async {
+    final data = await readFile(entry);
+    if (data == null) return false;
+
+    final dir = Directory('${(await getTemporaryDirectory()).path}/chest-share');
+    if (!dir.existsSync()) await dir.create(recursive: true);
+    final file = File('${dir.path}/${entry.id}_${_safeName(entry.displayName)}');
+    await file.writeAsBytes(data, flush: true);
+    try {
+      return await files.shareFile(
+        cachePath: file.path,
+        mimeType: _mimeTypeOf(entry.originalExtension),
+      );
+    } finally {
+      // The chooser has already handed the bytes to the target app, so the
+      // plaintext copy is no longer needed.
+      if (file.existsSync()) await file.delete();
+    }
+  }
+
+  /// Strips path separators from a display name so it cannot escape the cache
+  /// directory, which the FileProvider would refuse to publish anyway.
+  static String _safeName(String name) =>
+      name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+
+  /// A best-effort MIME type from the stored extension, so the receiving app
+  /// opens the file with the right viewer.
+  static String _mimeTypeOf(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'heic':
+        return 'image/heic';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'webm':
+        return 'video/webm';
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'wav':
+        return 'audio/wav';
+      case 'flac':
+        return 'audio/flac';
+      case 'm4a':
+        return 'audio/mp4';
+      case 'pdf':
+        return 'application/pdf';
+      case 'txt':
+        return 'text/plain';
+      case 'json':
+        return 'application/json';
+      case 'zip':
+        return 'application/zip';
+      default:
+        return 'application/octet-stream';
     }
   }
 

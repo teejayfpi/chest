@@ -72,6 +72,18 @@ kotlin {
     }
 }
 
+dependencies {
+    // FileProvider, used to hand a decrypted file to the app the user picks.
+    // Declared explicitly rather than leaned on transitively from a plugin, so
+    // a plugin upgrade cannot quietly remove it.
+    implementation("androidx.core:core-ktx:1.13.1")
+    // FlutterFragmentActivity, which the file picker needs for
+    // registerForActivityResult. FlutterActivity extends a plain Activity and
+    // cannot host an activity-result launcher.
+    implementation("androidx.fragment:fragment-ktx:1.6.2")
+    implementation("androidx.activity:activity-ktx:1.8.2")
+}
+
 flutter {
     source = "../.."
 }

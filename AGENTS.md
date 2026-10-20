@@ -17,18 +17,24 @@ the Dart layer degrades gracefully off-Android.
   the KDF salt), `index.chest` (encrypted index), `blobs/<id>.chest` (one sealed
   container per file).
 - `lib/platform/` — MethodChannel bridges. `app_lock_bridge.dart` talks to the
-  Kotlin freezer; `biometric_service.dart` wraps `local_auth`.
+  Kotlin freezer; `biometric_service.dart` wraps `local_auth`;
+  `chest_files_bridge.dart` drives the native picker, reader, original-remover
+  and share chooser.
+- `lib/core/chest_author.dart` — the builder credit shown in Settings.
 - `lib/state/chest_controller.dart` — single source of truth. Owns the auto-lock
   timer and every call into crypto/platform. Widgets never touch keys or channels.
 - `android/app/src/main/kotlin/com/chest/chest/` — `applock/` holds the
   device-admin receiver, the accessibility service, the hide store/manager and
-  the boot receiver.
+  the boot receiver. `files/` holds `ChestFilePicker` (SAF) and `ChestFileSealer`.
+
+`MainActivity` extends `FlutterFragmentActivity`, not `FlutterActivity`, because
+the file picker needs `registerForActivityResult` from `ComponentActivity`.
 
 ## Commands
 
 ```bash
 flutter analyze            # must be clean
-flutter test               # 94 tests
+flutter test               # 104 tests
 flutter build apk --release
 ```
 
@@ -112,3 +118,19 @@ Invariants to preserve if you touch this:
   `flutter build apk`, which needs `JAVA_HOME` set (source `/workspace/env.sh`).
   A JDK can vanish from this image; reinstall with
   `sudo apt-get install -y openjdk-21-jdk-headless`.
+- **No `file_picker` plugin, on purpose.** The plugin copies every picked file
+  into the app cache as **plaintext** before Dart ever sees it, which defeats a
+  vault, and its `AndroidOptions` default to read-only, so the original could not
+  be deleted. `ChestFilePicker` drives the Storage Access Framework directly with
+  `readWrite` and streams bytes straight to the vault. Do not reintroduce it.
+- **Deleting the original needs a write grant.** `deleteSource` returns
+  `removed: false` when the provider refuses (for example a `content://` image
+  the picker granted read-only). Treat that as "sealed but still visible" and
+  tell the user; do not report it as hidden, and do not roll the entry back —
+  the bytes are safe either way.
+- **Sealing order is load-bearing.** Always read and seal before deleting the
+  original, so a failure can lose nothing. `hide_files_test.dart` asserts the
+  call order on the channel, not just the end state.
+- **No INTERNET permission, ever.** WhatsApp contact goes through the native
+  bridge to `wa.me` rather than a URL launcher, so the app keeps its offline
+  posture. `aapt2 dump permissions` on the release APK is the check.

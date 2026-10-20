@@ -89,6 +89,37 @@ weaken the vault rather than strengthen it.
 
 ---
 
+## Hiding files
+
+Chest can take a file off your device and into the vault in one step. Pick a
+photo in the system picker and Chest seals it, then removes the original, so the
+only copy left is the encrypted one.
+
+The picker matters here. Chest drives the Storage Access Framework itself rather
+than using a general-purpose file-picker package, for two reasons. Those packages
+copy every file into the app's cache as **plaintext** before the app sees it,
+which leaves an unencrypted copy behind on a vault that exists to prevent exactly
+that. And they default to read-only access, which means the original could not be
+deleted afterwards. Chest asks for read and write, streams the bytes straight into
+the sealed container, and deletes the original only once the vault confirms it
+holds the copy. If sealing fails, nothing is deleted, so a failure cannot lose
+data.
+
+Chest reports "sealed" and "hidden" separately, because they can differ. Some
+providers refuse to let any app delete a file — a `content://` image granted
+read-only, for instance. Chest seals it anyway and then tells you plainly that the
+original is still in your gallery, because a file that is in the vault while a
+copy sits in the open is not hidden, and saying otherwise would be a lie about
+your own security.
+
+Restoring works the other way. Because Chest holds no storage permission, it
+cannot write back to your gallery itself; it hands the decrypted bytes to
+whichever app you choose, and deletes its own temporary copy as soon as that app
+takes over. Images are previewed in the app so you can confirm what you are about
+to restore.
+
+---
+
 ## Hiding apps
 
 Chest removes a frozen app from your launcher using
@@ -402,6 +433,12 @@ failures throttle the gate, and that freezing is never gated.
   is a speed bump on top.
 - **Recents thumbnails.** `FLAG_SECURE` covers the vault screen. The unlock screen
   is not covered, because there is nothing sensitive on it yet.
+
+---
+
+## Built by
+
+Chest was designed and built by **Ayanlowo Olatunji Ayobami**.
 
 ---
 

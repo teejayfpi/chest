@@ -24,8 +24,13 @@ the Dart layer degrades gracefully off-Android.
 - `lib/state/chest_controller.dart` — single source of truth. Owns the auto-lock
   timer and every call into crypto/platform. Widgets never touch keys or channels.
 - `android/app/src/main/kotlin/com/chest/chest/` — `applock/` holds the
-  device-admin receiver, the accessibility service, the hide store/manager and
-  the boot receiver. `files/` holds `ChestFilePicker` (SAF) and `ChestFileSealer`.
+  device-admin receiver, the accessibility guard service, the notification guard,
+  the frozen-set registry/store/manager and the boot receiver. `files/` holds
+  `ChestFilePicker` (SAF) and `ChestFileSealer`.
+- `assets/branding/` — generated logo/mark/splash PNGs, produced by
+  `tool/generate_brand_assets.py`. The logo is displayed in the Settings credit
+  card; `test/widget/brand_assets_test.dart` asserts they are bundled, because
+  `Image.asset` fails at runtime rather than at build time.
 
 `MainActivity` extends `FlutterFragmentActivity`, not `FlutterActivity`, because
 the file picker needs `registerForActivityResult` from `ComponentActivity`.
@@ -34,7 +39,7 @@ the file picker needs `registerForActivityResult` from `ComponentActivity`.
 
 ```bash
 flutter analyze            # must be clean
-flutter test               # 104 tests
+flutter test               # 112 tests
 flutter build apk --release
 ```
 
@@ -50,28 +55,61 @@ The release APK is debug-signed unless `android/key.properties` exists. CI write
 that file from repository secrets when `KEYSTORE_BASE64` is set and skips it
 otherwise, so forks build without any signing configuration.
 
-## Hiding apps is device-owner only
+## Freezing has two tiers, and the phone-only one is primary
 
+Freezing must work on a phone with nothing but the app installed. Device-owner
+provisioning needs a computer and usually a factory reset, so it is an *optional
+upgrade*, never a prerequisite. The UI leads with the on-device path.
+
+**Tier 1 — the app guard (any phone).** `ChestAppLockService`, an accessibility
+service the user enables in Settings:
+
+- Covers a frozen app with an opaque `TYPE_ACCESSIBILITY_OVERLAY` the instant it
+  reaches the foreground, then sends the user home. The overlay is load-bearing:
+  the home transition takes a few frames, and without it the frozen app is briefly
+  readable.
+- `ChestNotificationGuard`, a `NotificationListenerService`, cancels notifications
+  from frozen apps. It must be a separate service — an accessibility service
+  genuinely cannot cancel another app's notification, because `NotificationManager.cancel`
+  only affects the caller's own.
+
+**Tier 2 — launcher hiding (device owner).**
 `DevicePolicyManager.setApplicationHidden` is restricted to a **device owner or
 profile owner**. A legacy device admin calling it gets `SecurityException` on any
-app targeting API 24+, which Chest does. This is the single most important thing
-to understand before touching `ChestAppLockManager`: device-admin rights do not
-let Chest hide anything, and code that assumes otherwise is wrong.
+app targeting API 24+, which Chest does. When Chest is the device owner, freezing
+removes the icon from the launcher entirely.
+
+A **profile owner is deliberately not treated as able to hide apps**:
+`canHideApps` is `deviceOwnerActive` only. A profile owner governs a separate work
+profile, so it can hide work apps and cannot touch the personal apps in the main
+launcher — counting it would promise a hide on exactly the apps it cannot perform
+one on.
 
 Provisioning is `adb shell dpm set-device-owner
 com.chest.chest/.applock.ChestDeviceAdminReceiver`, and it needs a device with no
 accounts and no secondary users.
 
-Three invariants keep the feature from stranding a user:
+Invariants to preserve if you touch this:
 
-1. **Labels are cached at freeze time.** A hidden package disappears from
+1. **Never record a freeze nothing can enforce.** `freeze()` records the package
+   only when the platform hid it or the guard is running to block it. A switch
+   claiming otherwise would tell the user an app is contained while it opens
+   normally. `unhideAll` is the escape hatch, and it clears the store even when a
+   platform unhide failed, because clearing is what releases the guard.
+2. **The shield must lower itself.** It is added over a frozen app; nothing else
+   removes it, so without the timed lower (and the lower on leaving a frozen
+   package) it would sit permanently over the home screen and lock the user out of
+   their own phone. This was a real bug in the first draft.
+3. **The frozen set is shared in-process, not broadcast.** `FrozenSetRegistry` is
+   read by both the manager and the service. A broadcast would be missed entirely:
+   the guard is usually idle when the user taps freeze, and no receiver is
+   registered. Do not reintroduce one.
+4. **Only `TYPE_WINDOW_STATE_CHANGED` is handled.** `TYPE_WINDOWS_CHANGED` needs
+   `canRetrieveWindowContent="true"`, and Chest keeps that `false` so the service
+   is technically incapable of reading screen text. Do not flip it on.
+5. **Labels are cached at freeze time.** A hidden package disappears from
    `queryIntentActivities`, so without the cached label it would vanish from the
    freeze list and could never be unhidden.
-2. **Nothing is recorded unless the platform confirmed the hide.** `freeze()`
-   only writes to the store when `setApplicationHidden` returned true, so the UI
-   cannot claim a freeze that is not in force.
-3. **`unhideAll` is the escape hatch.** It iterates the local record because no
-   API enumerates hidden packages.
 
 ## Releasing an app is gated
 
@@ -110,8 +148,9 @@ Invariants to preserve if you touch this:
 - **Unmocked MethodChannels never reply in `flutter_test`.** Any code that
   `await`s a channel will hang. `test/screens/freezer_screen_test.dart` exposes
   `FakeAppLockChannel`, which mocks both the app-lock and security channels —
-  reuse it. Its `freeze` handler mirrors the native rule that only a device owner
-  gets `applied: true`, so tests exercise the honest-refusal path.
+  reuse it. Its `freeze` handler mirrors the native rule that a freeze is applied
+  only when the platform hid the app or the guard is running, so tests exercise the
+  honest-refusal path.
 - **Tall viewports are required** for the form screens, which extend past the
   default 800x600 test surface.
 - The Kotlin is not covered by `flutter test`. It is only checked by

@@ -21,7 +21,8 @@ header and the envelope.
 
 **Hides other apps.** Chest can remove apps from your launcher entirely, with
 their data intact, and put them back the moment you unfreeze them. Hiding is
-enforced by Android itself and survives a restart.
+enforced by Android itself and survives a restart — and putting an app back needs
+your passphrase, so it is not undone by whoever picks up the phone next.
 
 **Refuses to talk to the network.** The app requests no network permission at
 all, so there is no code path, including one introduced by a dependency, that can
@@ -153,6 +154,36 @@ Labels are cached at freeze time because a hidden package disappears from
 `queryIntentActivities` — without the cached label, the very apps you froze would
 vanish from the list you need in order to unfreeze them.
 
+### Only you can release an app
+
+Hiding an app is pointless if the next person to pick up the phone can simply tap
+it back. Releasing a frozen app is the direction that exposes data, so it is the
+one that is gated:
+
+- **Two factors.** When the device has biometrics enrolled, releasing asks for a
+  fingerprint **and** the vault passphrase. The passphrase is required even after
+  the fingerprint passes. A fingerprint can be spoofed on a rooted device and can
+  be taken from a sleeping owner, so it answers "is this the right person" but not
+  "does this person know the secret". Only the passphrase proves knowledge.
+- **No verifier on disk.** The passphrase is checked by re-deriving the root key
+  from the vault's own salt and comparing it to the key held in memory, in
+  constant time. Nothing extra is written to disk, so the gate adds no new
+  offline attack target — the encrypted index already is one.
+- **One-shot authorization.** A successful confirmation mints a single-use token,
+  and the release call consumes it. Driving the controller directly without a
+  token, replaying a spent token, or letting a confirmation survive an auto-lock
+  all fail closed.
+- **Throttling.** Wrong passphrases are counted and the gate refuses for a growing,
+  capped delay. This is defence in depth over Argon2id, which is the real cost of
+  guessing, not a replacement for it.
+- **Freezing is not gated.** Freezing only adds protection, so it stays a single
+  tap; gating it would make securing a dozen apps a dozen prompts while weakening
+  nothing.
+
+On a device with no biometrics enrolled the gate falls back to the passphrase
+alone rather than becoming unusable. That is a real reduction in factors, and the
+dialog says so.
+
 ---
 
 ## Security posture at a glance
@@ -168,6 +199,12 @@ vanish from the list you need in order to unfreeze them.
 - **Hardware key store probe.** The settings screen reports whether the platform
   offers StrongBox or a TEE, so you can see where key material could live rather
   than assuming the best case.
+- **Gated releases.** Unfreezing an app needs the passphrase (and a fingerprint
+  when one is enrolled), so hiding an app is not undone by whoever picks up the
+  phone next. See [Only you can release an app](#only-you-can-release-an-app).
+- **Honest capability reporting.** Every screen that describes a protection checks
+  whether it is actually active on this device. The app never claims a hide it did
+  not perform or a guarantee the platform is not enforcing.
 
 ---
 
@@ -187,6 +224,7 @@ lib/
   screens/         One screen per destination
   theme/           Palette and Material theme
   widgets/         Shared UI pieces
+    protected_release_gate.dart  Two-factor confirmation for releases
 android/app/src/main/kotlin/com/chest/chest/
   MainActivity.kt                Method-channel bridge
   applock/ChestAppLockManager.kt Hide/unhide via DevicePolicyManager
@@ -220,7 +258,7 @@ container length does not reveal the exact size of what you stored.
 ```bash
 flutter pub get
 flutter analyze          # expect: no issues
-flutter test             # expect: 80 tests pass
+flutter test             # expect: 94 tests pass
 flutter build apk --release
 ```
 
@@ -267,6 +305,13 @@ directory, so the unlock path is exercised end to end: a wrong passphrase is
 refused, the right one opens the vault, and a successful biometric prompt still
 does not unlock anything on its own.
 
+`test/screens/release_gate_test.dart` covers the release gate the same way,
+against a real unlocked vault, so the passphrase check really runs Argon2id rather
+than a stand-in. It confirms that a successful fingerprint still demands the
+passphrase, that a wrong passphrase releases nothing even when the fingerprint
+passed, that tokens are single-use and do not survive a lock, that repeated
+failures throttle the gate, and that freezing is never gated.
+
 ---
 
 ## Limitations, stated plainly
@@ -286,6 +331,16 @@ does not unlock anything on its own.
 - **No key wrapping in hardware.** The probe reports what the device offers; it
   does not yet wrap the root key in a hardware-backed key. That is the natural
   next step.
+- **The release gate protects Chest, not the whole phone.** It stops someone
+  releasing an app *through Chest*. It cannot stop a determined attacker with an
+  unlocked bootloader or root from calling `pm unhide` directly, from disabling
+  Chest's accessibility service, or from re-provisioning the device owner. The
+  gate raises the bar for the realistic case — someone handed your phone — and
+  does not claim to defeat a rooted device. Nothing app-level can.
+- **The gate's throttling is in memory.** It resets when the process restarts,
+  because there is no safe place outside the vault to persist a counter without
+  creating a new attack surface. Argon2id is the real cost of guessing; the delay
+  is a speed bump on top.
 - **Recents thumbnails.** `FLAG_SECURE` covers the vault screen. The unlock screen
   is not covered, because there is nothing sensitive on it yet.
 

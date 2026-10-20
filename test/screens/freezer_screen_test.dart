@@ -161,9 +161,13 @@ class FakeAppLockChannel {
 }
 
 /// Pumps the freezer on a tall viewport so the list is fully built.
+///
+/// Pass [controller] to drive the screen with a prepared (for example unlocked)
+/// controller instead of a bare one.
 Future<ChestController> pumpFreezer(
   WidgetTester tester, {
   required FakeAppLockChannel channel,
+  ChestController? controller,
 }) async {
   channel.install();
   addTearDown(channel.remove);
@@ -172,17 +176,17 @@ Future<ChestController> pumpFreezer(
   tester.view.devicePixelRatio = 3.0;
   addTearDown(tester.view.reset);
 
-  final controller = ChestController();
-  addTearDown(controller.dispose);
+  final active = controller ?? ChestController();
+  if (controller == null) addTearDown(active.dispose);
 
   await tester.pumpWidget(
     ChangeNotifierProvider<ChestController>.value(
-      value: controller,
+      value: active,
       child: MaterialApp(theme: ChestTheme.dark(), home: const FreezerScreen()),
     ),
   );
   await tester.pumpAndSettle();
-  return controller;
+  return active;
 }
 
 void main() {
@@ -335,7 +339,7 @@ void main() {
       expect(find.text('1 frozen'), findsOneWidget);
     });
 
-    testWidgets('toggling a frozen app unhides it', (tester) async {
+    testWidgets('releasing a frozen app asks for confirmation first', (tester) async {
       final channel = FakeAppLockChannel(
         capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
       );
@@ -345,8 +349,25 @@ void main() {
       await tester.tap(find.byType(Switch).at(1));
       await tester.pumpAndSettle();
 
-      expect(channel.unfreezeCalls, ['com.example.chat']);
-      expect(find.text('Chat is back in the launcher.'), findsOneWidget);
+      // The gate opens, and nothing has been released yet.
+      expect(find.textContaining('Confirm to release Chat'), findsOneWidget);
+      expect(channel.unfreezeCalls, isEmpty);
+    });
+
+    testWidgets('cancelling the gate releases nothing', (tester) async {
+      final channel = FakeAppLockChannel(
+        capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
+      );
+      await pumpFreezer(tester, channel: channel);
+
+      await tester.tap(find.byType(Switch).at(1));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(channel.unfreezeCalls, isEmpty);
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.text('1 frozen'), findsOneWidget);
     });
 
     testWidgets('a hidden app is badged and stays listed', (tester) async {
@@ -358,15 +379,15 @@ void main() {
       );
 
       // Chat is hidden, and must remain visible in the list so it can be
-      // unfrozen — that is the whole reason labels are cached natively.
+      // released — that is the whole reason labels are cached natively.
       expect(find.text('Chat'), findsOneWidget);
       expect(find.text('HIDDEN'), findsOneWidget);
     });
 
-    testWidgets('restore all is offered only when something is frozen',
+    testWidgets('release all is offered only when something is frozen',
         (tester) async {
       await pumpFreezer(tester, channel: FakeAppLockChannel());
-      expect(find.text('Restore all'), findsOneWidget);
+      expect(find.text('Release all'), findsOneWidget);
 
       final clean = FakeAppLockChannel();
       clean.apps = [
@@ -379,18 +400,18 @@ void main() {
         },
       ];
       await pumpFreezer(tester, channel: clean);
-      expect(find.text('Restore all'), findsNothing);
+      expect(find.text('Release all'), findsNothing);
     });
 
-    testWidgets('restore all calls the escape hatch', (tester) async {
+    testWidgets('release all is gated too', (tester) async {
       final channel = FakeAppLockChannel();
       await pumpFreezer(tester, channel: channel);
 
-      await tester.tap(find.text('Restore all'));
+      await tester.tap(find.text('Release all'));
       await tester.pumpAndSettle();
 
-      expect(channel.unhideAllCalls, 1);
-      expect(find.text('2 apps restored to the launcher.'), findsOneWidget);
+      expect(find.textContaining('Confirm to release every app'), findsOneWidget);
+      expect(channel.unhideAllCalls, 0);
     });
 
     testWidgets('the app-info button opens system settings', (tester) async {

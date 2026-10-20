@@ -256,9 +256,22 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(color: ChestTheme.parchment, fontSize: 14),
                   ),
                   subtitle: const Text(
-                    'Convenience only. The vault key still comes from your passphrase, so a biometric prompt can never open the chest on its own.',
+                    'Convenience only for unlocking. The vault key still comes from your passphrase. Releasing a frozen app always needs the passphrase too, even after the fingerprint passes.',
                     style: TextStyle(color: ChestTheme.muted, fontSize: 12, height: 1.4),
                   ),
+                ),
+                const Divider(height: 22),
+                const ChestKeyValue(
+                  label: 'Releasing frozen apps',
+                  value: 'Passphrase required',
+                  valueColor: ChestTheme.moss,
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Unfreezing an app is the direction that exposes data, so it is '
+                  'confirmed with a biometric check and your passphrase. Freezing an '
+                  'app is not gated, because it only adds protection.',
+                  style: TextStyle(color: ChestTheme.muted, fontSize: 12, height: 1.45),
                 ),
                 const Divider(height: 22),
                 ChestKeyValue(

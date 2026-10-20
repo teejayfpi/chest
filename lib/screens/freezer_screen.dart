@@ -6,6 +6,7 @@ import '../models/vault_models.dart';
 import '../state/chest_controller.dart';
 import '../theme/chest_theme.dart';
 import '../widgets/chest_widgets.dart';
+import '../widgets/protected_release_gate.dart';
 
 /// Freeze screen: choose apps to disable at the operating-system level.
 class FreezerScreen extends StatefulWidget {
@@ -39,17 +40,25 @@ class _FreezerScreenState extends State<FreezerScreen> {
     await controller.loadApps();
   }
 
+  /// Freezes [app] immediately, or routes a release through the two-factor gate.
+  ///
+  /// Freezing is deliberately not gated: it only adds protection. Releasing is
+  /// gated because it puts the app back in the launcher.
   Future<void> _toggle(FreezableApp app) async {
+    if (app.frozen) {
+      await _release(app);
+      return;
+    }
+    await _freeze(app);
+  }
+
+  Future<void> _freeze(FreezableApp app) async {
     final controller = context.read<ChestController>();
     final messenger = ScaffoldMessenger.of(context);
-    final result = await controller.toggleFreeze(app);
+    final result = await controller.freezeApp(app);
 
     final String message;
-    if (app.frozen) {
-      message = result.applied
-          ? '${app.label} is back in the launcher.'
-          : '${app.label} released from the freeze list.';
-    } else if (result.isHard) {
+    if (result.isHard) {
       message = '${app.label} hidden from the launcher.';
     } else if (result.method == 'protected') {
       message = '${app.label} is protected and cannot be frozen.';
@@ -57,6 +66,40 @@ class _FreezerScreenState extends State<FreezerScreen> {
       message = '${app.label} could not be hidden. Set up device owner first.';
     }
     messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Asks for the two factors, then releases only if they both pass.
+  Future<void> _release(FreezableApp app) async {
+    final controller = context.read<ChestController>();
+    final messenger = ScaffoldMessenger.of(context);
+
+    final authorization = await ProtectedReleaseGate.show(
+      context,
+      actionLabel: 'release ${app.label}',
+      detail: 'You are about to put ${app.label} back in your launcher. '
+          'Anyone holding this phone could then open it.',
+    );
+
+    // A null token means the user cancelled or failed the gate. Nothing is
+    // released, and no channel call is made.
+    if (authorization == null) return;
+
+    final result = await controller.releaseApp(app, authorization: authorization);
+    if (result == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Release refused: the confirmation expired.')),
+      );
+      return;
+    }
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          result.applied
+              ? '${app.label} is back in the launcher.'
+              : '${app.label} released from the freeze list.',
+        ),
+      ),
+    );
   }
 
   @override
@@ -226,10 +269,27 @@ class _EnforcementPanel extends StatelessWidget {
               if (frozenCount > 0)
                 _PanelAction(
                   icon: Icons.lock_open,
-                  label: 'Restore all',
+                  label: 'Release all',
                   onPressed: () async {
                     final messenger = ScaffoldMessenger.of(context);
-                    final restored = await controller.unhideAll();
+                    final authorization = await ProtectedReleaseGate.show(
+                      context,
+                      actionLabel: 'release every app',
+                      detail: 'You are about to put all $frozenCount frozen '
+                          '${frozenCount == 1 ? 'app' : 'apps'} back in your launcher at once.',
+                    );
+                    if (authorization == null) return;
+                    final restored = await controller.releaseAll(
+                      authorization: authorization,
+                    );
+                    if (restored == null) {
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text('Release refused: the confirmation expired.'),
+                        ),
+                      );
+                      return;
+                    }
                     messenger.showSnackBar(
                       SnackBar(
                         content: Text(

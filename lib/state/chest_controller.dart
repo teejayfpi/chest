@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
@@ -11,6 +12,42 @@ import '../platform/biometric_service.dart';
 
 /// Top-level screens the app can be showing.
 enum ChestRoute { onboarding, unlock, vault, freezer, settings }
+
+/// Why a release (unfreeze) request was allowed or refused.
+enum ReleaseDecision {
+  /// The user passed every required factor.
+  authorized,
+
+  /// The vault is locked, so there is no key to verify against.
+  vaultLocked,
+
+  /// The passphrase did not match.
+  wrongPassphrase,
+
+  /// Too many failures; the gate is temporarily refusing to try.
+  throttled,
+}
+
+/// Outcome of an attempt to authorize a release.
+class ReleaseAuthorizationResult {
+  const ReleaseAuthorizationResult({
+    required this.decision,
+    this.retryAfter,
+    this.attemptsRemaining,
+  });
+
+  /// What the gate decided.
+  final ReleaseDecision decision;
+
+  /// When [ReleaseDecision.throttled], how long until another attempt is allowed.
+  final Duration? retryAfter;
+
+  /// When [ReleaseDecision.wrongPassphrase], tries left before a lockout.
+  final int? attemptsRemaining;
+
+  /// True when the action may proceed.
+  bool get authorized => decision == ReleaseDecision.authorized;
+}
 
 /// Single source of truth for the UI.
 ///
@@ -70,6 +107,187 @@ class ChestController extends ChangeNotifier {
 
   bool _biometricsEnabled = true;
   bool get biometricsEnabled => _biometricsEnabled;
+
+  /// Set once the biometric prompt has succeeded for the attempt in progress.
+  ///
+  /// Tracked here rather than trusted from the dialog so that "biometric *and*
+  /// passphrase" is enforced by the controller, not by the widget happening to
+  /// call the right methods in the right order.
+  bool _biometricSatisfiedThisAttempt = false;
+
+  /// Whether the biometric factor is currently available for release.
+  bool _biometricFactorAvailable = false;
+
+  /// One-shot token minted by [authorizeRelease] and consumed by the release
+  /// call it was minted for.
+  ///
+  /// The UI cannot authorise a release by passing a bare `true`: it would have
+  /// to know a value generated inside this controller, and each token is spent
+  /// by the first release that uses it. That stops one successful confirmation
+  /// from cascading into several unfreezes.
+  String? _releaseAuthorizationToken;
+
+  int _releaseFailures = 0;
+  DateTime? _releaseBlockedUntil;
+
+  bool _authorizingRelease = false;
+
+  /// True while a release confirmation is being verified.
+  ///
+  /// The verification runs a full Argon2id derivation, so the UI disables its
+  /// button rather than letting an impatient double-tap queue a second one.
+  bool get authorizingRelease => _authorizingRelease;
+
+  /// Failed passphrase attempts before the gate starts refusing outright.
+  static const int releaseAttemptLimit = 5;
+
+  /// True while the gate is refusing attempts.
+  bool get releaseBlocked {
+    final until = _releaseBlockedUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  /// How long until another release attempt is accepted, or null if allowed now.
+  Duration? get releaseRetryAfter {
+    final until = _releaseBlockedUntil;
+    if (until == null) return null;
+    final remaining = until.difference(DateTime.now());
+    return remaining.isNegative ? null : remaining;
+  }
+
+  /// True when releasing an app needs a biometric prompt as well as a passphrase.
+  bool get releaseNeedsBiometric =>
+      _biometricsEnabled && _biometricFactorAvailable;
+
+  /// How long the gate refuses after [failures] consecutive wrong passphrases.
+  ///
+  /// Grows exponentially and is capped, so a user who fat-fingers it twice is
+  /// barely delayed while a scripted attempt is slowed to a crawl. The delay
+  /// lives in memory only: it is defence in depth over Argon2id, which is the
+  /// real cost of guessing, not a substitute for it.
+  static Duration lockoutFor(int failures) {
+    if (failures < 1) return Duration.zero;
+    final seconds = 2 * (1 << (failures - 1).clamp(0, 8));
+    return Duration(seconds: seconds.clamp(2, 900));
+  }
+
+  /// Probes whether the biometric factor can be used, for the gate UI.
+  Future<void> refreshBiometricAvailability() async {
+    _biometricFactorAvailable = await biometrics.canAuthenticate();
+    notifyListeners();
+  }
+
+  /// Runs the biometric factor for an in-progress release confirmation.
+  ///
+  /// Returns true when the prompt succeeded. A device without enrolled
+  /// biometrics reports false, and the passphrase factor alone still applies —
+  /// the gate never becomes weaker than the passphrase.
+  Future<bool> confirmReleaseWithBiometrics() async {
+    final outcome = await biometrics.authenticate(
+      reason: 'Confirm to release a frozen app',
+      allowPasscodeFallback: false,
+    );
+    _biometricSatisfiedThisAttempt = outcome == BiometricOutcome.success;
+    return _biometricSatisfiedThisAttempt;
+  }
+
+  /// Authorizes a release (unfreeze) with [passphrase].
+  ///
+  /// Two factors are required when the device can offer them: the biometric
+  /// prompt must have succeeded via [confirmReleaseWithBiometrics] *and* the
+  /// passphrase must match the vault. Biometrics alone deliberately never
+  /// suffices — on a rooted device a fingerprint can be spoofed, and a
+  /// sleeping owner's finger can be used — so the passphrase remains the factor
+  /// that actually proves knowledge.
+  ///
+  /// On success mints a one-shot token that the matching release call consumes.
+  Future<ReleaseAuthorizationResult> authorizeRelease(String passphrase) async {
+    final blocked = releaseRetryAfter;
+    if (blocked != null) {
+      return ReleaseAuthorizationResult(
+        decision: ReleaseDecision.throttled,
+        retryAfter: blocked,
+      );
+    }
+
+    final session = _session;
+    if (session == null) {
+      return const ReleaseAuthorizationResult(
+        decision: ReleaseDecision.vaultLocked,
+      );
+    }
+
+    _authorizingRelease = true;
+    notifyListeners();
+
+    // Consume the biometric result whatever happens next, so a failure cannot
+    // leave a satisfied factor lying around for a later attempt.
+    final biometricOk = _biometricSatisfiedThisAttempt;
+    _biometricSatisfiedThisAttempt = false;
+
+    try {
+      if (releaseNeedsBiometric && !biometricOk) {
+        return _recordReleaseFailure();
+      }
+
+      final bool ok;
+      try {
+        ok = await vault.verifyPassphrase(session: session, passphrase: passphrase);
+      } on VaultLockedException {
+        return const ReleaseAuthorizationResult(
+          decision: ReleaseDecision.vaultLocked,
+        );
+      } on ChestCryptoException {
+        return _recordReleaseFailure();
+      }
+
+      if (!ok) return _recordReleaseFailure();
+
+      _releaseFailures = 0;
+      _releaseBlockedUntil = null;
+      _releaseAuthorizationToken = _newToken();
+      return const ReleaseAuthorizationResult(
+        decision: ReleaseDecision.authorized,
+      );
+    } finally {
+      _authorizingRelease = false;
+      notifyListeners();
+    }
+  }
+
+  /// Records a failed attempt and applies the growing lockout.
+  ReleaseAuthorizationResult _recordReleaseFailure() {
+    _releaseFailures++;
+    final attemptsRemaining = (releaseAttemptLimit - _releaseFailures).clamp(0, releaseAttemptLimit);
+    if (_releaseFailures >= releaseAttemptLimit) {
+      _releaseBlockedUntil = DateTime.now().add(lockoutFor(_releaseFailures));
+    }
+    notifyListeners();
+    return ReleaseAuthorizationResult(
+      decision: ReleaseDecision.wrongPassphrase,
+      attemptsRemaining: attemptsRemaining,
+    );
+  }
+
+  /// True when [token] matches the outstanding authorization, and spends it.
+  ///
+  /// Always clears the stored token, so a captured authorization cannot be
+  /// replayed against a second app.
+  bool _consumeAuthorization(String? token) {
+    final pending = _releaseAuthorizationToken;
+    _releaseAuthorizationToken = null;
+    return pending != null && token != null && pending == token;
+  }
+
+  /// The token a caller must present to release a frozen app.
+  ///
+  /// Only meaningful immediately after [authorizeRelease] returned an authorized
+  /// result; it is cleared the moment a release consumes it or a lock happens.
+  String? get pendingReleaseAuthorization => _releaseAuthorizationToken;
+
+  /// A single-use authorization token. Random rather than a counter, so its
+  /// value cannot be guessed by the widget layer.
+  String _newToken() => base64Url.encode(ChestRandom.bytes(18));
 
   /// How long the vault stays unlocked with no interaction.
   Duration autoLockAfter = const Duration(minutes: 3);
@@ -147,6 +365,11 @@ class ChestController extends ChangeNotifier {
     _apps = const [];
     _route = ChestRoute.unlock;
     _error = null;
+    // Any authorization minted before the lock must not survive it: otherwise a
+    // dialog confirmed moments before an auto-lock would still release an app
+    // afterwards, with no key in memory to have verified against.
+    _releaseAuthorizationToken = null;
+    _biometricSatisfiedThisAttempt = false;
     unawaited(_applyScreenshotProtection(false));
     notifyListeners();
   }
@@ -234,20 +457,54 @@ class ChestController extends ChangeNotifier {
     }
   }
 
-  /// Freezes or unfreezes [app], updating the list in place.
+  /// Freezes [app], updating the list in place.
+  ///
+  /// Freezing is not gated. It only *adds* protection — the app leaves the
+  /// launcher and its data stays intact and sealed — so demanding a passphrase
+  /// for it would make securing a dozen apps a dozen prompts while weakening
+  /// nothing. Releasing is the direction that exposes data, and that is the one
+  /// [releaseApp] gates.
   ///
   /// The result is reported honestly: when the platform refused the hide (no
   /// device-owner provisioning), the app is *not* marked frozen, because a
   /// frozen flag the platform does not back would tell the user an app is hidden
   /// from the launcher when it is not.
-  Future<FreezeResult> toggleFreeze(FreezableApp app) async {
-    final result = app.frozen
-        ? await appLock.unfreeze(app.packageName)
-        : await appLock.freeze(app.packageName, label: app.label);
+  Future<FreezeResult> freezeApp(FreezableApp app) async {
+    if (app.frozen) {
+      return const FreezeResult(applied: true, method: 'noop');
+    }
+    final result = await appLock.freeze(app.packageName, label: app.label);
+    if (result.applied) {
+      _apps = _apps
+          .map(
+            (a) => a.packageName == app.packageName
+                ? a.copyWith(frozen: true, hidden: result.isHard)
+                : a,
+          )
+          .toList(growable: false);
+    }
+    _capabilities = await appLock.capabilities();
+    notifyListeners();
+    return result;
+  }
+
+  /// Releases (unfreezes) [app], consuming the one-shot [authorization].
+  ///
+  /// Returns null when the authorization is missing, stale or already spent —
+  /// i.e. when no successful [authorizeRelease] backs this call. A null return
+  /// means the app was left frozen and no channel call was made, so an
+  /// unauthorised caller cannot release anything even by driving the controller
+  /// directly.
+  Future<FreezeResult?> releaseApp(
+    FreezableApp app, {
+    required String? authorization,
+  }) async {
+    if (!_consumeAuthorization(authorization)) return null;
+    final result = await appLock.unfreeze(app.packageName);
     _apps = _apps
         .map(
           (a) => a.packageName == app.packageName
-              ? a.copyWith(frozen: result.applied, hidden: result.isHard)
+              ? a.copyWith(frozen: false, hidden: false)
               : a,
         )
         .toList(growable: false);
@@ -256,10 +513,12 @@ class ChestController extends ChangeNotifier {
     return result;
   }
 
-  /// Restores every hidden app and clears the freeze list.
+  /// Restores every hidden app, consuming the one-shot [authorization].
   ///
-  /// Returns the number of apps the platform actually restored.
-  Future<int> unhideAll() async {
+  /// Returns null when unauthorized, so the caller cannot tell an empty freeze
+  /// list apart from a refused release without having been authorized first.
+  Future<int?> releaseAll({required String? authorization}) async {
+    if (!_consumeAuthorization(authorization)) return null;
     _setBusy(true);
     try {
       final result = await appLock.unhideAll();

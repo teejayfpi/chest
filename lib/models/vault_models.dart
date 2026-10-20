@@ -62,6 +62,7 @@ class FreezableApp {
     required this.label,
     required this.isSystem,
     required this.frozen,
+    this.hidden = false,
   });
 
   /// Android package identifier.
@@ -76,64 +77,117 @@ class FreezableApp {
   /// Whether the user has frozen it.
   final bool frozen;
 
+  /// Whether the platform has actually removed it from the launcher.
+  ///
+  /// This is distinct from [frozen]: an app can be marked frozen while only the
+  /// accessibility guard is enforcing it, in which case it is still visible in
+  /// the launcher. Only a true hide takes it off the launcher entirely.
+  final bool hidden;
+
   /// Parses the map returned by the native method channel.
   factory FreezableApp.fromMap(Map<dynamic, dynamic> map) => FreezableApp(
         packageName: map['packageName'] as String,
         label: map['label'] as String,
         isSystem: (map['isSystem'] as bool?) ?? false,
         frozen: (map['frozen'] as bool?) ?? false,
+        hidden: (map['hidden'] as bool?) ?? false,
       );
 
   /// Copy with a different frozen state.
-  FreezableApp copyWith({bool? frozen}) => FreezableApp(
+  FreezableApp copyWith({bool? frozen, bool? hidden}) => FreezableApp(
         packageName: packageName,
         label: label,
         isSystem: isSystem,
         frozen: frozen ?? this.frozen,
+        hidden: hidden ?? this.hidden,
       );
 }
 
 /// Which enforcement tiers are currently available on the device.
 class FreezeCapabilities {
   const FreezeCapabilities({
+    required this.deviceOwnerActive,
+    required this.profileOwnerActive,
     required this.deviceAdminActive,
     required this.accessibilityEnabled,
-    required this.canHideApps,
+    this.notificationAccessEnabled = false,
+    required this.hiddenCount,
     required this.sdkInt,
+    this.packageName = 'com.chest.chest',
   });
 
-  /// True when Chest holds device-admin rights, enabling a hard freeze.
+  /// True when Chest is provisioned as device owner.
+  ///
+  /// This is the only state in which an app can actually be hidden from the
+  /// launcher. Legacy device-admin rights are deliberately not enough: the
+  /// platform rejects `setApplicationHidden` from a legacy admin on any app
+  /// targeting API 24 or above.
+  final bool deviceOwnerActive;
+
+  /// True when Chest is a profile owner. Also sufficient to hide apps.
+  ///
+  /// Note the scope limit: a profile owner manages a *work profile* and can only
+  /// hide packages inside it. It cannot hide the personal apps the user actually
+  /// sees in their main launcher. See [canHideApps].
+  final bool profileOwnerActive;
+
+  /// True when Chest holds legacy device-admin rights.
   final bool deviceAdminActive;
 
   /// True when the enforcement accessibility service is running.
   final bool accessibilityEnabled;
 
-  /// True when the platform supports `setApplicationHidden` (API 21+).
-  final bool canHideApps;
+  /// True when the user has granted Chest notification access.
+  ///
+  /// A separate grant from the accessibility one, because dismissing another
+  /// app's notification requires a `NotificationListenerService`. Without it a
+  /// frozen messenger can still show message text in the shade.
+  final bool notificationAccessEnabled;
+
+  /// Number of apps Chest currently has hidden.
+  final int hiddenCount;
 
   /// Android API level.
   final int sdkInt;
 
-  /// True when freezing is fully enforced at the OS level.
-  bool get hardFreezeAvailable => deviceAdminActive && canHideApps;
+  /// Chest's own package name, used to build the provisioning command.
+  final String packageName;
 
-  /// True when at least one enforcement mechanism is active.
-  bool get anyEnforcement => hardFreezeAvailable || accessibilityEnabled;
+  /// True when the platform will accept a hide request.
+  ///
+  /// This is deliberately device owner only, *not* device owner or profile
+  /// owner. Both satisfy the platform's permission check, but a profile owner
+  /// governs a separate work profile: it can hide work apps and cannot touch the
+  /// personal apps in the user's main launcher. Reporting "launcher hiding
+  /// active" for a profile owner would promise a hide on exactly the apps it
+  /// cannot perform it on, so a profile owner is treated as the soft tier.
+  bool get canHideApps => deviceOwnerActive;
+
+  /// True when Chest is a profile owner but not the device owner.
+  ///
+  /// Surfaced so the UI can explain the narrower scope instead of implying the
+  /// freeze applies to the whole phone.
+  bool get profileOwnerOnly => profileOwnerActive && !deviceOwnerActive;
 
   /// Parses the map returned by the native method channel.
-  factory FreezeCapabilities.fromMap(Map<dynamic, dynamic> map) =>
-      FreezeCapabilities(
+  factory FreezeCapabilities.fromMap(Map<dynamic, dynamic> map) => FreezeCapabilities(
+        deviceOwnerActive: (map['deviceOwnerActive'] as bool?) ?? false,
+        profileOwnerActive: (map['profileOwnerActive'] as bool?) ?? false,
         deviceAdminActive: (map['deviceAdminActive'] as bool?) ?? false,
         accessibilityEnabled: (map['accessibilityEnabled'] as bool?) ?? false,
-        canHideApps: (map['canHideApps'] as bool?) ?? false,
+        notificationAccessEnabled: (map['notificationAccessEnabled'] as bool?) ?? false,
+        hiddenCount: (map['hiddenCount'] as int?) ?? 0,
         sdkInt: (map['sdkInt'] as int?) ?? 0,
+        packageName: (map['packageName'] as String?) ?? 'com.chest.chest',
       );
 
   /// Fallback used on platforms without the native bridge.
   static const FreezeCapabilities unsupported = FreezeCapabilities(
+    deviceOwnerActive: false,
+    profileOwnerActive: false,
     deviceAdminActive: false,
     accessibilityEnabled: false,
-    canHideApps: false,
+    hiddenCount: 0,
     sdkInt: 0,
   );
 }
@@ -185,21 +239,51 @@ class HardwareSecurity {
 
 /// Outcome of a freeze or unfreeze request.
 class FreezeResult {
-  const FreezeResult({required this.applied, required this.method});
+  const FreezeResult({
+    required this.applied,
+    required this.method,
+    this.restored = 0,
+    this.failed = 0,
+  });
 
   /// True when the platform actually enforced the change.
   final bool applied;
 
-  /// `device_admin`, `soft` or `protected`.
+  /// How the change was enforced.
+  ///
+  /// - `device_owner` — hidden from the launcher by the platform.
+  /// - `accessibility` — blocked on open by the app guard, still in the launcher.
+  /// - `none` — nothing could enforce it; no freeze was recorded.
+  /// - `protected` — refused because the package must stay reachable.
   final String method;
 
-  /// True when the freeze is enforced by the OS rather than by Chest's service.
-  bool get isHard => applied && method == 'device_admin';
+  /// Apps restored by an [AppLockBridge.unhideAll] call.
+  final int restored;
+
+  /// Apps that could not be restored by an [AppLockBridge.unhideAll] call.
+  final int failed;
+
+  /// True when the freeze removed the app from the launcher.
+  ///
+  /// Only a device-owner hide achieves this; the accessibility tier leaves the
+  /// app in the launcher and blocks it on open instead.
+  bool get isHard => applied && method == 'device_owner';
+
+  /// True when the freeze is enforced by the app guard rather than the platform.
+  ///
+  /// Real enforcement — the app is blocked the moment it opens — but the icon
+  /// remains visible, so the UI must not describe it as hidden.
+  bool get isGuarded => applied && method == 'accessibility';
+
+  /// True when no mechanism could enforce the freeze.
+  bool get isUnenforced => !applied && method == 'none';
 
   /// Parses the map returned by the native method channel.
   factory FreezeResult.fromMap(Map<dynamic, dynamic> map) => FreezeResult(
         applied: (map['applied'] as bool?) ?? false,
         method: (map['method'] as String?) ?? 'soft',
+        restored: (map['restored'] as int?) ?? 0,
+        failed: (map['failed'] as int?) ?? 0,
       );
 }
 

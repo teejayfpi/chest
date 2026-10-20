@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../core/chest_author.dart';
 import '../crypto/cascade_cipher.dart';
 import '../state/chest_controller.dart';
 import '../theme/chest_theme.dart';
@@ -177,11 +179,18 @@ class SettingsScreen extends StatelessWidget {
             child: Column(
               children: [
                 ChestKeyValue(
+                  label: 'Device owner',
+                  value: capabilities.canHideApps ? 'Active' : 'Not set up',
+                  valueColor: capabilities.canHideApps
+                      ? ChestTheme.moss
+                      : ChestTheme.gold,
+                ),
+                ChestKeyValue(
                   label: 'Device admin',
                   value: capabilities.deviceAdminActive ? 'Granted' : 'Not granted',
                   valueColor: capabilities.deviceAdminActive
                       ? ChestTheme.moss
-                      : ChestTheme.gold,
+                      : ChestTheme.muted,
                 ),
                 ChestKeyValue(
                   label: 'App guard service',
@@ -191,17 +200,27 @@ class SettingsScreen extends StatelessWidget {
                       : ChestTheme.muted,
                 ),
                 ChestKeyValue(
-                  label: 'Freeze strength',
-                  value: capabilities.hardFreezeAvailable
-                      ? 'System-enforced'
-                      : capabilities.accessibilityEnabled
-                          ? 'Guard only'
-                          : 'None',
-                  valueColor: capabilities.hardFreezeAvailable
+                  label: 'Apps hidden',
+                  value: '${capabilities.hiddenCount}',
+                  valueColor: capabilities.hiddenCount > 0
                       ? ChestTheme.moss
-                      : ChestTheme.gold,
+                      : ChestTheme.muted,
                 ),
                 const SizedBox(height: 10),
+                Text(
+                  capabilities.canHideApps
+                      ? 'Chest is the device owner, so frozen apps are removed from '
+                          'the launcher and cannot be started.'
+                      : 'Without device-owner provisioning Chest cannot hide an app '
+                          'from the launcher. See the Freezer screen for the one-time '
+                          'setup command.',
+                  style: const TextStyle(
+                    color: ChestTheme.muted,
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -239,9 +258,22 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(color: ChestTheme.parchment, fontSize: 14),
                   ),
                   subtitle: const Text(
-                    'Convenience only. The vault key still comes from your passphrase, so a biometric prompt can never open the chest on its own.',
+                    'Convenience only for unlocking. The vault key still comes from your passphrase. Releasing a frozen app always needs the passphrase too, even after the fingerprint passes.',
                     style: TextStyle(color: ChestTheme.muted, fontSize: 12, height: 1.4),
                   ),
+                ),
+                const Divider(height: 22),
+                const ChestKeyValue(
+                  label: 'Releasing frozen apps',
+                  value: 'Passphrase required',
+                  valueColor: ChestTheme.moss,
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Unfreezing an app is the direction that exposes data, so it is '
+                  'confirmed with a biometric check and your passphrase. Freezing an '
+                  'app is not gated, because it only adds protection.',
+                  style: TextStyle(color: ChestTheme.muted, fontSize: 12, height: 1.45),
                 ),
                 const Divider(height: 22),
                 ChestKeyValue(
@@ -312,6 +344,9 @@ class SettingsScreen extends StatelessWidget {
           ),
           if (descriptor != null) const SizedBox(height: 0),
           const SizedBox(height: 24),
+          const ChestSectionHeader(title: 'Built by'),
+          const _BuilderCredit(),
+          const SizedBox(height: 22),
           const Center(
             child: Text(
               'Chest · sealed by design',
@@ -324,9 +359,114 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
+/// The builder's credit, with a way to start a WhatsApp conversation.
+///
+/// The contact action goes through the native bridge rather than a URL
+/// launcher, because a `wa.me` link is handled by WhatsApp itself and so Chest
+/// still needs no INTERNET permission. If WhatsApp is absent or the number
+/// cannot be used, the number is offered for copying instead of silently
+/// failing.
+class _BuilderCredit extends StatelessWidget {
+  const _BuilderCredit();
+
+  Future<void> _contact(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final controller = context.read<ChestController>();
+
+    final opened = await controller.files.openWhatsApp(ChestAuthor.phoneDial);
+    if (opened) return;
+
+    await Clipboard.setData(const ClipboardData(text: ChestAuthor.phoneDial));
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('WhatsApp is not available, so the number was copied instead.'),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ChestPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset(
+                  'assets/branding/chest_logo.png',
+                  width: 38,
+                  height: 38,
+                  filterQuality: FilterQuality.medium,
+                  semanticLabel: 'Chest logo',
+                ),
+              ),
+              const SizedBox(width: 13),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      ChestAuthor.name,
+                      style: TextStyle(
+                        color: ChestTheme.parchment,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      ChestAuthor.role,
+                      style: TextStyle(color: ChestTheme.muted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const ChestKeyValue(
+            label: 'Phone',
+            value: ChestAuthor.phoneDisplay,
+            valueColor: ChestTheme.parchment,
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: ChestTheme.moss,
+                  foregroundColor: ChestTheme.obsidian,
+                ),
+                onPressed: () => _contact(context),
+                icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                label: const Text('Message on WhatsApp'),
+              ),
+              const SizedBox(width: 10),
+              IconButton(
+                tooltip: 'Copy the number',
+                icon: const Icon(Icons.copy_all_outlined, size: 18, color: ChestTheme.cyan),
+                onPressed: () async {
+                  final messenger = ScaffoldMessenger.of(context);
+                  await Clipboard.setData(
+                    const ClipboardData(text: ChestAuthor.phoneDial),
+                  );
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Number copied.')),
+                  );
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _PrivacyRow extends StatelessWidget {
   const _PrivacyRow({required this.icon, required this.text});
-
   final IconData icon;
   final String text;
 

@@ -2,17 +2,20 @@
 <!--
   Device administration policy for Chest.
 
-  Device-admin rights are what let Chest disable an app outright, rather than
-  merely hiding its launcher entry: DevicePolicyManager.setApplicationHidden()
-  requires an active admin, and the hidden state survives a reboot because the
-  platform, not Chest, enforces it.
+  Device-admin rights are a *prerequisite for provisioning*, not the mechanism
+  that hides apps. DevicePolicyManager.setApplicationHidden() is restricted to a
+  device owner or profile owner; a legacy device admin calling it is rejected
+  with SecurityException on any app targeting API 24 or above. Chest therefore
+  asks the user to provision it as device owner, and this receiver is what makes
+  that provisioning possible.
 
-  No password-quality or wipe policy is requested. Chest deliberately asks for
-  the narrowest set of rights that make freezing work.
+  No password-quality or wipe policy is requested here. Provisioning Chest as
+  device owner does grant the ability to wipe the device; Chest does not use it,
+  and the freezer says so before the user runs the provisioning command.
 -->
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-policies>
-        <!-- Required for setApplicationHidden / setPackagesSuspended. -->
+        <!-- Declared so the receiver can be provisioned; not used for lock/wipe. -->
         <force-lock />
     </uses-policies>
 </device-admin>

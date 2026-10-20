@@ -1,26 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Accessibility service used to enforce the freeze locally.
+  Accessibility service used to enforce a freeze on the device itself.
 
   Rationale: Android provides no supported way for a normal app to kill another
-  app's process. Two mechanisms exist in practice, and Chest uses both:
+  app's process, and removing an icon from the launcher needs device owner, which
+  needs a computer and usually a factory reset. This service is the phone-only
+  tier, granted entirely on the device the app is installed on.
 
-    1. DevicePolicyManager.setApplicationHidden() — requires device-admin. This
-       is the authoritative freeze and needs no accessibility at all.
-    2. An accessibility service that detects the frozen package coming to the
-       foreground and immediately sends the user home. This is a *defence in
-       depth* layer for the window between a freeze request and the platform
-       applying it, and for OEM builds where setApplicationHidden is a no-op.
+  Two mechanisms exist and Chest uses both where it can:
+
+    1. DevicePolicyManager.setApplicationHidden() — requires the caller to be the
+       device owner. When available it is the strongest freeze: the app leaves
+       the launcher. No accessibility needed.
+    2. This service, which covers a frozen app with an opaque overlay the moment
+       it comes to the foreground and sends the user home. That is the phone-only
+       path, and the fallback when Chest is not device owner.
 
   The service is strictly passive about content: it never reads window text,
   never inspects node contents, and only compares the reported package name
   against a locally stored frozen set. canRetrieveWindowContent is explicitly
   false so the service is technically incapable of reading what is on screen.
+  The consequence is that TYPE_WINDOWS_CHANGED is not delivered, which is why
+  only window state changes are requested below.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews"
+    android:accessibilityFlags="flagDefault"
     android:canRetrieveWindowContent="false"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="0"

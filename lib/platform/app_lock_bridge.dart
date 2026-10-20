@@ -40,19 +40,23 @@ class AppLockBridge {
   }
 
   /// Freezes [packageName].
-  Future<FreezeResult> freeze(String packageName) async {
+  ///
+  /// [label] is passed through so the native side can cache it: once a package
+  /// is hidden it disappears from package queries, and the cached label is the
+  /// only way to still show it in the freeze list.
+  Future<FreezeResult> freeze(String packageName, {String? label}) async {
     try {
       final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
         'freeze',
-        {'packageName': packageName},
+        {'packageName': packageName, 'label': label ?? packageName},
       );
       _available = true;
-      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
       return FreezeResult.fromMap(raw);
     } on MissingPluginException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     } on PlatformException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     }
   }
 
@@ -64,12 +68,12 @@ class AppLockBridge {
         {'packageName': packageName},
       );
       _available = true;
-      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
       return FreezeResult.fromMap(raw);
     } on MissingPluginException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     } on PlatformException {
-      return const FreezeResult(applied: false, method: 'soft');
+      return const FreezeResult(applied: false, method: 'none');
     }
   }
 
@@ -87,6 +91,23 @@ class AppLockBridge {
     }
   }
 
+  /// Restores every app Chest has hidden.
+  ///
+  /// The escape hatch: if a freeze leaves the device in a state the user cannot
+  /// undo from the list, this clears it in one call.
+  Future<FreezeResult> unhideAll() async {
+    try {
+      final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('unhideAll');
+      _available = true;
+      if (raw == null) return const FreezeResult(applied: false, method: 'none');
+      return FreezeResult.fromMap(raw);
+    } on MissingPluginException {
+      return const FreezeResult(applied: false, method: 'none');
+    } on PlatformException {
+      return const FreezeResult(applied: false, method: 'none');
+    }
+  }
+
   /// Opens the system device-admin approval dialog.
   Future<void> requestDeviceAdmin() =>
       _invokeVoid('requestDeviceAdmin');
@@ -94,6 +115,13 @@ class AppLockBridge {
   /// Opens the system Accessibility settings page.
   Future<void> openAccessibilitySettings() =>
       _invokeVoid('openAccessibilitySettings');
+
+  /// Opens the system notification-access page.
+  ///
+  /// A separate grant from accessibility, needed to dismiss notifications from
+  /// frozen apps.
+  Future<void> openNotificationAccessSettings() =>
+      _invokeVoid('openNotificationAccessSettings');
 
   /// Opens the system app-details page for [packageName].
   Future<void> openAppDetailsSettings(String packageName) =>

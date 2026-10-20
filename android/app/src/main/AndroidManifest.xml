@@ -12,9 +12,14 @@
     -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
-    <!-- Needed to react to the frozen set changing while the service runs. -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Required to hide frozen apps via DevicePolicyManager. -->
+    <!-- Re-applies hidden state after a reboot or an app update. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      Required to list installed apps so the user can choose what to hide.
+      Also covers the WhatsApp deep link: on API 30+ an app cannot see another
+      package unless it declares an interest, so without this entry the contact
+      button would report WhatsApp as missing on a phone that has it.
+    -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
@@ -69,8 +74,23 @@
         </receiver>
 
         <!--
+          Re-applies the recorded hidden state after a reboot or an app update,
+          so a failed write cannot leave an app hidden with no way to restore it.
+        -->
+        <receiver
+            android:name=".applock.ChestBootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
           Enforcement service. Bound by the framework only after the user
-          enables it in Accessibility settings.
+          enables it in Accessibility settings. Needs no computer and no factory
+          reset: this is the phone-only tier.
         -->
         <service
             android:name=".applock.ChestAppLockService"
@@ -84,6 +104,39 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/chest_accessibility_service" />
         </service>
+
+        <!--
+          Dismisses notifications from frozen apps. A separate service because an
+          accessibility service cannot cancel another app's notification; only a
+          NotificationListenerService can. Granted on the device, in Settings,
+          with no computer involved.
+        -->
+        <service
+            android:name=".applock.ChestNotificationGuard"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Publishes a decrypted file to whatever app the user picks, so a sealed
+          photo can be saved back to the gallery or sent on without Chest ever
+          writing plaintext somewhere another app can stumble across. The paths
+          file restricts it to Chest's own cache directory.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.chest.files"
+            android:exported="false"
+            android:grantUriPermissions="true"
+            android:label="@string/file_provider_label">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/chest_file_paths" />
+        </provider>
 
         <meta-data
             android:name="flutterEmbedding"
@@ -103,5 +156,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
+        <!-- Lets Chest see whether WhatsApp is installed before offering it. -->
+        <package android:name="com.whatsapp" />
     </queries>
 </manifest>

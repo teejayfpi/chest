@@ -146,6 +146,35 @@ class VaultSession {
     return opened.plaintext;
   }
 
+  /// Verifies [passphrase] against this open session.
+  ///
+  /// Re-derives the root key from the vault's own salt and KDF preset and
+  /// compares it to the live key with [constantTimeEquals]. This deliberately
+  /// stores **no verifier on disk**: adding one would create a new offline
+  /// target, and the encrypted index already serves that role. Comparing against
+  /// the in-memory key instead means verifying a passphrase is exactly as hard to
+  /// attack as opening the vault.
+  ///
+  /// Costs one full Argon2id derivation, so callers should gate this behind
+  /// throttling and never call it on every keystroke.
+  ///
+  /// Returns false for an empty passphrase rather than throwing, so the caller
+  /// has one uniform "not authorised" path.
+  Future<bool> verifyPassphrase(String passphrase) async {
+    _assertLive();
+    if (passphrase.isEmpty) return false;
+    final candidate = await KeyDerivation.deriveRootKey(
+      passphrase: passphrase,
+      salt: descriptor.salt,
+      profile: descriptor.profile,
+    );
+    try {
+      return constantTimeEquals(candidate, _rootKey);
+    } finally {
+      wipe(candidate);
+    }
+  }
+
   /// Zeroes all key material and invalidates the session.
   void dispose() {
     if (_disposed) return;
@@ -280,6 +309,17 @@ class VaultService {
   /// Reads and decrypts the index.
   Future<List<VaultEntry>> listEntries(VaultSession session) =>
       _readIndex(session);
+
+  /// Verifies a passphrase against an open [session].
+  ///
+  /// Delegates to [VaultSession.verifyPassphrase]; see that method for why no
+  /// verifier is persisted. Throws [VaultLockedException] if the session has
+  /// already been disposed, so a stale dialog cannot authorise anything.
+  Future<bool> verifyPassphrase({
+    required VaultSession session,
+    required String passphrase,
+  }) =>
+      session.verifyPassphrase(passphrase);
 
   /// Encrypts [data] under [name] and adds it to the index.
   Future<VaultEntry> addFile({

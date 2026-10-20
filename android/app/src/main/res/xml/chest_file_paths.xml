@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one directory the FileProvider may publish: Chest's own cache.
+
+  Scope matters here. A FileProvider is a read grant handed to another app, so
+  pointing it at a shared or external directory would let a receiving app walk
+  whatever else lives there. Restricting it to cacheDir/chest-share means the
+  only thing that can ever be handed out is a file Chest itself just wrote, and
+  Chest deletes it as soon as the chooser returns.
+-->
+<paths>
+    <cache-path
+        name="chest-share"
+        path="chest-share/" />
+</paths>

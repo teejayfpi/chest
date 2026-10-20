@@ -5,8 +5,9 @@
   Rationale: Android provides no supported way for a normal app to kill another
   app's process. Two mechanisms exist in practice, and Chest uses both:
 
-    1. DevicePolicyManager.setApplicationHidden() — requires device-admin. This
-       is the authoritative freeze and needs no accessibility at all.
+    1. DevicePolicyManager.setApplicationHidden() — requires the caller to be a
+       device owner or profile owner. This is the authoritative freeze: the app
+       leaves the launcher and cannot be started. It needs no accessibility.
     2. An accessibility service that detects the frozen package coming to the
        foreground and immediately sends the user home. This is a *defence in
        depth* layer for the window between a freeze request and the platform

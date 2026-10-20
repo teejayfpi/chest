@@ -18,25 +18,27 @@ data class InstalledApp(
     val label: String,
     val isSystem: Boolean,
     val frozen: Boolean,
+    val hidden: Boolean,
 )
 
 /**
- * Enumerates launchable apps and applies freeze/unfreeze.
+ * Enumerates launchable apps and applies hide/unhide.
  *
- * Freezing has two tiers, and the class always attempts the strong one first:
+ * Hiding is done with `DevicePolicyManager.setApplicationHidden`, which removes
+ * the package from the launcher, makes it unlaunchable, and leaves its data
+ * intact. The operation is fully reversible and the platform enforces it, so a
+ * hidden app stays hidden across reboots without Chest running.
  *
- *  - **Device-admin tier.** `setApplicationHidden` asks the platform to disable
- *    the package outright. The app disappears from the launcher, cannot be
- *    started, and stays that way across reboots because the platform enforces
- *    it. This is what makes a freeze a real freeze rather than a UI trick.
+ * That call requires the caller to be a **device owner or profile owner**.
+ * Legacy device-admin rights are not sufficient: the platform throws
+ * `SecurityException` for a legacy admin targeting API 24 or above. Chest
+ * targets a modern API level, so device-admin alone can never hide anything —
+ * this is why the app asks for device-owner provisioning instead.
  *
- *  - **Soft tier.** When admin rights have not been granted, or the device
- *    refuses the call, the package is only recorded locally. It still shows in
- *    the launcher, but [ChestAppLockService] bounces the user home the moment it
- *    comes to the foreground.
- *
- * The result carries which tier was used so the UI can be honest with the user
- * about how strong the freeze currently is.
+ * When Chest is not device owner, freezing degrades to the soft tier: the
+ * package is recorded locally and [ChestAppLockService] bounces the user home
+ * when it comes to the foreground. That is a weaker guarantee, and the result
+ * map says so rather than pretending the two are equivalent.
  */
 object ChestAppLockManager {
 
@@ -58,7 +60,14 @@ object ChestAppLockManager {
         "com.android.inputmethod.latin",
     )
 
-    /** Returns every launchable app, annotated with its current freeze state. */
+    /**
+     * Returns every launchable app, annotated with its current freeze state.
+     *
+     * Hidden packages are merged back in from the local store. A hidden package
+     * is not returned by `queryIntentActivities` at all, so without this step the
+     * user would be unable to see — and therefore unable to unhide — exactly the
+     * apps they had frozen.
+     */
     fun listApps(context: Context): List<Map<String, Any>> {
         val pm = context.packageManager
         val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
@@ -67,6 +76,7 @@ object ChestAppLockManager {
         @Suppress("DEPRECATION")
         val resolved = pm.queryIntentActivities(intent, 0)
         val frozen = ChestAppLockStore.frozenPackages(context).toSet()
+        val labels = ChestAppLockStore.labels(context)
         val self = context.packageName
 
         val apps = LinkedHashMap<String, InstalledApp>()
@@ -84,11 +94,27 @@ object ChestAppLockManager {
 
             val label = pm.getApplicationLabel(appInfo).toString()
             val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            val isFrozen = frozen.contains(packageName)
             apps[packageName] = InstalledApp(
                 packageName = packageName,
                 label = label,
                 isSystem = isSystem,
-                frozen = frozen.contains(packageName),
+                frozen = isFrozen,
+                hidden = isFrozen && isHidden(context, packageName),
+            )
+        }
+
+        // Re-add frozen packages that no longer resolve, using the label cached
+        // at freeze time. Their hidden state is confirmed against the platform.
+        for (packageName in frozen) {
+            if (apps.containsKey(packageName)) continue
+            if (PROTECTED_PACKAGES.contains(packageName)) continue
+            apps[packageName] = InstalledApp(
+                packageName = packageName,
+                label = labels[packageName] ?: packageName,
+                isSystem = false,
+                frozen = true,
+                hidden = isHidden(context, packageName),
             )
         }
 
@@ -100,34 +126,45 @@ object ChestAppLockManager {
                     "label" to it.label,
                     "isSystem" to it.isSystem,
                     "frozen" to it.frozen,
+                    "hidden" to it.hidden,
                 )
             }
     }
 
     /**
-     * Freezes [packageName].
+     * Hides [packageName].
      *
      * Returns a map with `applied` (whether the platform hid the app) and
-     * `method` (`"device_admin"` or `"soft"`).
+     * `method` (`"device_owner"`, `"device_admin"` or `"soft"`).
      */
-    fun freeze(context: Context, packageName: String): Map<String, Any> {
+    fun freeze(context: Context, packageName: String, label: String): Map<String, Any> {
         if (PROTECTED_PACKAGES.contains(packageName)) {
             return mapOf("applied" to false, "method" to "protected")
         }
-        ChestAppLockStore.freeze(context, packageName)
         val hidden = setHidden(context, packageName, hidden = true)
+        if (hidden) {
+            // Only record a package we actually hid. Recording a package that is
+            // still visible would leave the UI claiming a freeze that is not in
+            // force, and the boot receiver would keep re-applying nothing.
+            ChestAppLockStore.freeze(context, packageName, label)
+        }
         broadcastFrozenSetChanged(context)
         return mapOf(
             "applied" to hidden,
-            "method" to if (hidden) "device_admin" else "soft",
+            "method" to when {
+                hidden && isDeviceOwner(context) -> "device_owner"
+                hidden -> "device_admin"
+                else -> "soft"
+            },
         )
     }
 
     /**
-     * Unfreezes [packageName].
+     * Unhides [packageName].
      *
-     * Unhiding is always attempted first so that a previously device-admin
-     * freeze is fully reversed even if the local record was lost.
+     * Unhiding is attempted even when the package is absent from the local
+     * store, so a freeze recorded by an earlier version of Chest is still
+     * reversible.
      */
     fun unfreeze(context: Context, packageName: String): Map<String, Any> {
         val unhidden = setHidden(context, packageName, hidden = false)
@@ -135,11 +172,69 @@ object ChestAppLockManager {
         broadcastFrozenSetChanged(context)
         return mapOf(
             "applied" to unhidden,
-            "method" to if (unhidden) "device_admin" else "soft",
+            "method" to if (unhidden) "device_owner" else "soft",
         )
     }
 
-    /** True when Chest currently holds device-admin rights. */
+    /**
+     * Unhides every package Chest recorded as frozen.
+     *
+     * This is the escape hatch. If a freeze ever leaves the device in a state the
+     * user cannot undo through the normal list, this restores everything in one
+     * call. It iterates the local record rather than asking the platform, because
+     * there is no API that enumerates hidden packages.
+     */
+    fun unhideAll(context: Context): Map<String, Any> {
+        val recorded = ChestAppLockStore.frozenPackages(context)
+        var restored = 0
+        var failed = 0
+        for (packageName in recorded) {
+            if (setHidden(context, packageName, hidden = false)) restored++ else failed++
+        }
+        ChestAppLockStore.clear(context)
+        broadcastFrozenSetChanged(context)
+        return mapOf(
+            "applied" to (failed == 0),
+            "restored" to restored,
+            "failed" to failed,
+            "method" to "device_owner",
+        )
+    }
+
+    /**
+     * Re-applies the recorded hidden state to the platform.
+     *
+     * Run at boot and after an app update, so a crash or a failed write cannot
+     * leave an app hidden with no record of how to restore it — or conversely,
+     * leave the store claiming a hide the platform has forgotten.
+     */
+    fun reconcile(context: Context) {
+        if (!isDeviceOwner(context) && !isProfileOwner(context)) return
+        val recorded = ChestAppLockStore.frozenPackages(context)
+        if (recorded.isEmpty()) return
+        for (packageName in recorded) {
+            if (!isHidden(context, packageName)) {
+                Log.i(TAG, "re-applying hidden state for $packageName")
+                setHidden(context, packageName, hidden = true)
+            }
+        }
+    }
+
+    /** True when Chest is the device owner. */
+    fun isDeviceOwner(context: Context): Boolean {
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+            ?: return false
+        return dpm.isDeviceOwnerApp(context.packageName)
+    }
+
+    /** True when Chest is a profile owner. */
+    fun isProfileOwner(context: Context): Boolean {
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+            ?: return false
+        return dpm.isProfileOwnerApp(context.packageName)
+    }
+
+    /** True when Chest holds legacy device-admin rights. */
     fun isDeviceAdminActive(context: Context): Boolean {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
             ?: return false
@@ -152,21 +247,54 @@ object ChestAppLockManager {
         ChestAppLockStore.isAccessibilityServiceEnabled(context, ChestAppLockService::class.java)
 
     /**
+     * True when the platform will accept a hide request.
+     *
+     * Device owner and profile owner both satisfy the platform's permission
+     * check; legacy device admin does not.
+     */
+    fun canHideApps(context: Context): Boolean = isDeviceOwner(context) || isProfileOwner(context)
+
+    /** Number of packages Chest currently has hidden. */
+    fun hiddenCount(context: Context): Int =
+        ChestAppLockStore.frozenPackages(context).count { isHidden(context, it) }
+
+    /**
+     * Reports whether [packageName] is hidden.
+     *
+     * Returns false when Chest lacks the rights to ask, which keeps the UI from
+     * claiming a hidden state it cannot substantiate.
+     */
+    private fun isHidden(context: Context, packageName: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+            ?: return false
+        if (!canHideApps(context)) return false
+        val admin = ComponentName(context, ChestDeviceAdminReceiver::class.java)
+        return try {
+            dpm.isApplicationHidden(admin, packageName)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "isApplicationHidden($packageName) refused", e)
+            false
+        }
+    }
+
+    /**
      * Calls [DevicePolicyManager.setApplicationHidden].
      *
-     * `setApplicationHidden` is API 21+. On older platforms this returns false
-     * and the caller falls back to the soft tier. The `@Suppress` is for the
-     * deprecated overload resolution on newer SDKs; the call itself is current.
+     * `setApplicationHidden` is API 21+ and, from API 24, is restricted to device
+     * and profile owners. When Chest holds neither, this returns false and the
+     * caller falls back to the soft tier rather than reporting a freeze that did
+     * not happen.
      */
     private fun setHidden(context: Context, packageName: String, hidden: Boolean): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
             ?: return false
-        val admin = ComponentName(context, ChestDeviceAdminReceiver::class.java)
-        if (!dpm.isAdminActive(admin)) {
-            Log.i(TAG, "device admin not active; $packageName stays soft-frozen")
+        if (!canHideApps(context)) {
+            Log.i(TAG, "not device/profile owner; $packageName stays soft-frozen")
             return false
         }
+        val admin = ComponentName(context, ChestDeviceAdminReceiver::class.java)
         return try {
             dpm.setApplicationHidden(admin, packageName, hidden)
         } catch (e: SecurityException) {

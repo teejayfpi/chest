@@ -13,8 +13,9 @@ import android.view.accessibility.AccessibilityEvent
  * Android gives a normal app no supported way to kill another app's process, so
  * "freezing" is enforced in two places:
  *
- *  1. [ChestDeviceAdmin] calls `setApplicationHidden`, which is authoritative
- *     and survives reboots. That is the real freeze.
+ *  1. [ChestAppLockManager] calls `setApplicationHidden` when Chest is device
+ *     owner, which removes the app from the launcher and makes it unlaunchable.
+ *     That is the real freeze.
  *  2. This service is defence in depth. It watches for a frozen package coming
  *     to the foreground and immediately sends the user home, covering the window
  *     between a freeze request and the platform applying it, and OEM builds

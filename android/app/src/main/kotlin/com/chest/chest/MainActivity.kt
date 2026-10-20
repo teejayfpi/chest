@@ -49,11 +49,13 @@ class MainActivity : FlutterActivity() {
                     when (call.method) {
                         "listApps" -> result.success(ChestAppLockManager.listApps(this))
                         "freeze" -> withPackage(call, result) { pkg ->
-                            result.success(ChestAppLockManager.freeze(this, pkg))
+                            val label = call.argument<String>("label") ?: pkg
+                            result.success(ChestAppLockManager.freeze(this, pkg, label))
                         }
                         "unfreeze" -> withPackage(call, result) { pkg ->
                             result.success(ChestAppLockManager.unfreeze(this, pkg))
                         }
+                        "unhideAll" -> result.success(ChestAppLockManager.unhideAll(this))
                         "capabilities" -> result.success(capabilities())
                         "setSecureFlag" -> {
                             // Blocks screenshots and blanks the recents thumbnail.
@@ -127,10 +129,14 @@ class MainActivity : FlutterActivity() {
 
     /** Current enforcement state, so the UI can show what is actually active. */
     private fun capabilities(): Map<String, Any> = mapOf(
+        "deviceOwnerActive" to ChestAppLockManager.isDeviceOwner(this),
+        "profileOwnerActive" to ChestAppLockManager.isProfileOwner(this),
         "deviceAdminActive" to ChestAppLockManager.isDeviceAdminActive(this),
         "accessibilityEnabled" to ChestAppLockManager.isAccessibilityEnabled(this),
-        "canHideApps" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP),
+        "canHideApps" to ChestAppLockManager.canHideApps(this),
+        "hiddenCount" to ChestAppLockManager.hiddenCount(this),
         "sdkInt" to Build.VERSION.SDK_INT,
+        "packageName" to packageName,
     )
 
     /** Opens the system dialog that grants Chest device-admin rights. */

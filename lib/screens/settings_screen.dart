@@ -177,11 +177,18 @@ class SettingsScreen extends StatelessWidget {
             child: Column(
               children: [
                 ChestKeyValue(
+                  label: 'Device owner',
+                  value: capabilities.canHideApps ? 'Active' : 'Not set up',
+                  valueColor: capabilities.canHideApps
+                      ? ChestTheme.moss
+                      : ChestTheme.gold,
+                ),
+                ChestKeyValue(
                   label: 'Device admin',
                   value: capabilities.deviceAdminActive ? 'Granted' : 'Not granted',
                   valueColor: capabilities.deviceAdminActive
                       ? ChestTheme.moss
-                      : ChestTheme.gold,
+                      : ChestTheme.muted,
                 ),
                 ChestKeyValue(
                   label: 'App guard service',
@@ -191,17 +198,27 @@ class SettingsScreen extends StatelessWidget {
                       : ChestTheme.muted,
                 ),
                 ChestKeyValue(
-                  label: 'Freeze strength',
-                  value: capabilities.hardFreezeAvailable
-                      ? 'System-enforced'
-                      : capabilities.accessibilityEnabled
-                          ? 'Guard only'
-                          : 'None',
-                  valueColor: capabilities.hardFreezeAvailable
+                  label: 'Apps hidden',
+                  value: '${capabilities.hiddenCount}',
+                  valueColor: capabilities.hiddenCount > 0
                       ? ChestTheme.moss
-                      : ChestTheme.gold,
+                      : ChestTheme.muted,
                 ),
                 const SizedBox(height: 10),
+                Text(
+                  capabilities.canHideApps
+                      ? 'Chest is the device owner, so frozen apps are removed from '
+                          'the launcher and cannot be started.'
+                      : 'Without device-owner provisioning Chest cannot hide an app '
+                          'from the launcher. See the Freezer screen for the one-time '
+                          'setup command.',
+                  style: const TextStyle(
+                    color: ChestTheme.muted,
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(

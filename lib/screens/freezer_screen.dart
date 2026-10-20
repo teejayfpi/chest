@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/vault_models.dart';
@@ -46,12 +47,14 @@ class _FreezerScreenState extends State<FreezerScreen> {
     final String message;
     if (app.frozen) {
       message = result.applied
-          ? '${app.label} released.'
+          ? '${app.label} is back in the launcher.'
           : '${app.label} released from the freeze list.';
+    } else if (result.isHard) {
+      message = '${app.label} hidden from the launcher.';
+    } else if (result.method == 'protected') {
+      message = '${app.label} is protected and cannot be frozen.';
     } else {
-      message = result.isHard
-          ? '${app.label} frozen and disabled by the system.'
-          : '${app.label} added to the freeze list. Grant device admin for a hard freeze.';
+      message = '${app.label} could not be hidden. Set up device owner first.';
     }
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
@@ -116,7 +119,6 @@ class _FreezerScreenState extends State<FreezerScreen> {
                             final app = apps[index];
                             return _AppTile(
                               app: app,
-                              hardFreezeAvailable: capabilities.hardFreezeAvailable,
                               onToggle: () => _toggle(app),
                               onOpenSettings: () =>
                                   controller.appLock.openAppDetailsSettings(app.packageName),
@@ -131,11 +133,13 @@ class _FreezerScreenState extends State<FreezerScreen> {
   }
 }
 
-/// Explains which enforcement tier is currently active, and offers to fix it.
+/// Explains which enforcement tier is active, and offers to fix it.
 ///
-/// Being explicit here matters: a "soft" freeze only bounces the user home when
-/// the app comes to the foreground, which is a weaker guarantee than the
-/// platform-level disable. The user should know which one they have.
+/// Being explicit here matters. Hiding an app from the launcher requires Chest
+/// to be provisioned as device owner, which is a deliberate, one-time step the
+/// user has to perform on a computer. Without it a freeze cannot remove the app
+/// from the launcher at all, so the panel says so rather than implying a hide
+/// happened when it did not.
 class _EnforcementPanel extends StatelessWidget {
   const _EnforcementPanel({required this.capabilities, required this.frozenCount});
 
@@ -145,26 +149,26 @@ class _EnforcementPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final controller = context.read<ChestController>();
-    final hard = capabilities.hardFreezeAvailable;
+    final canHide = capabilities.canHideApps;
 
     return ChestPanel(
-      accent: hard ? ChestTheme.moss : ChestTheme.gold,
+      accent: canHide ? ChestTheme.moss : ChestTheme.gold,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Icon(
-                hard ? Icons.verified_user : Icons.shield_outlined,
+                canHide ? Icons.visibility_off : Icons.shield_outlined,
                 size: 19,
-                color: hard ? ChestTheme.moss : ChestTheme.gold,
+                color: canHide ? ChestTheme.moss : ChestTheme.gold,
               ),
               const SizedBox(width: 9),
               Expanded(
                 child: Text(
-                  hard ? 'Hard freeze active' : 'Soft freeze only',
+                  canHide ? 'Launcher hiding active' : 'Device owner not set up',
                   style: TextStyle(
-                    color: hard ? ChestTheme.moss : ChestTheme.gold,
+                    color: canHide ? ChestTheme.moss : ChestTheme.gold,
                     fontWeight: FontWeight.w700,
                     fontSize: 14,
                   ),
@@ -179,17 +183,22 @@ class _EnforcementPanel extends StatelessWidget {
           ),
           const SizedBox(height: 9),
           Text(
-            hard
-                ? 'Frozen apps are disabled by Android itself, so they cannot be launched and stay disabled after a restart.'
-                : 'Without device-admin rights Chest can only send you home when a frozen app tries to open. Grant device admin for a real, system-enforced freeze.',
+            canHide
+                ? 'Frozen apps are hidden from your launcher and cannot be started. Their data is kept, and they come back the moment you unfreeze them.'
+                : 'Chest needs to be the device owner before it can hide an app from the launcher. '
+                    'This is a one-time setup that needs a computer and, usually, a freshly reset phone.',
             style: const TextStyle(color: ChestTheme.muted, fontSize: 12.5, height: 1.5),
           ),
+          if (!canHide) ...[
+            const SizedBox(height: 13),
+            _SetupCommand(command: capabilities.provisioningCommand),
+          ],
           const SizedBox(height: 13),
           Wrap(
             spacing: 9,
             runSpacing: 9,
             children: [
-              if (!capabilities.deviceAdminActive)
+              if (!canHide)
                 _PanelAction(
                   icon: Icons.admin_panel_settings_outlined,
                   label: 'Grant device admin',
@@ -203,21 +212,96 @@ class _EnforcementPanel extends StatelessWidget {
                 _PanelAction(
                   icon: Icons.accessibility_new,
                   label: 'Enable app guard',
-                  emphasised: !capabilities.deviceAdminActive,
+                  emphasised: false,
                   onPressed: () async {
                     await controller.appLock.openAccessibilitySettings();
                   },
                 ),
-              if (capabilities.anyEnforcement)
+              if (capabilities.anyEnforcement || canHide)
                 _PanelAction(
                   icon: Icons.refresh,
                   label: 'Re-check',
                   onPressed: controller.refreshCapabilities,
                 ),
+              if (frozenCount > 0)
+                _PanelAction(
+                  icon: Icons.lock_open,
+                  label: 'Restore all',
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final restored = await controller.unhideAll();
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          restored == 1
+                              ? '1 app restored to the launcher.'
+                              : '$restored apps restored to the launcher.',
+                        ),
+                      ),
+                    );
+                  },
+                ),
             ],
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Shows the `dpm set-device-owner` command with a copy button.
+class _SetupCommand extends StatelessWidget {
+  const _SetupCommand({required this.command});
+
+  final String command;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Run this once over USB with adb:',
+                style: TextStyle(color: ChestTheme.muted, fontSize: 12),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Copy command',
+              icon: const Icon(Icons.copy_all, size: 16, color: ChestTheme.gold),
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: command));
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Command copied.')),
+                );
+              },
+            ),
+          ],
+        ),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: ChestTheme.obsidian,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(color: ChestTheme.hairline),
+          ),
+          child: SelectableText(
+            command,
+            style: ChestTheme.mono.copyWith(fontSize: 11, color: ChestTheme.parchment),
+          ),
+        ),
+        const SizedBox(height: 7),
+        const Text(
+          'The device must have no accounts and no other users, so this usually '
+          'means a factory reset first. Setting up device owner also lets Chest '
+          'wipe the device; Chest never does.',
+          style: TextStyle(color: ChestTheme.muted, fontSize: 11.5, height: 1.45),
+        ),
+      ],
     );
   }
 }
@@ -271,13 +355,11 @@ class _PanelAction extends StatelessWidget {
 class _AppTile extends StatelessWidget {
   const _AppTile({
     required this.app,
-    required this.hardFreezeAvailable,
     required this.onToggle,
     required this.onOpenSettings,
   });
 
   final FreezableApp app;
-  final bool hardFreezeAvailable;
   final VoidCallback onToggle;
   final VoidCallback onOpenSettings;
 
@@ -329,6 +411,16 @@ class _AppTile extends StatelessWidget {
                     if (app.isSystem) ...[
                       const SizedBox(width: 7),
                       const ChestChip(label: 'SYSTEM', color: ChestTheme.muted),
+                    ],
+                    // Only shown when the platform actually removed the app
+                    // from the launcher, so the badge cannot overstate things.
+                    if (app.hidden) ...[
+                      const SizedBox(width: 7),
+                      const ChestChip(
+                        label: 'HIDDEN',
+                        color: ChestTheme.moss,
+                        icon: Icons.visibility_off,
+                      ),
                     ],
                   ],
                 ),

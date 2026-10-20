@@ -235,16 +235,40 @@ class ChestController extends ChangeNotifier {
   }
 
   /// Freezes or unfreezes [app], updating the list in place.
+  ///
+  /// The result is reported honestly: when the platform refused the hide (no
+  /// device-owner provisioning), the app is *not* marked frozen, because a
+  /// frozen flag the platform does not back would tell the user an app is hidden
+  /// from the launcher when it is not.
   Future<FreezeResult> toggleFreeze(FreezableApp app) async {
     final result = app.frozen
         ? await appLock.unfreeze(app.packageName)
-        : await appLock.freeze(app.packageName);
+        : await appLock.freeze(app.packageName, label: app.label);
     _apps = _apps
-        .map((a) => a.packageName == app.packageName ? a.copyWith(frozen: !app.frozen) : a)
+        .map(
+          (a) => a.packageName == app.packageName
+              ? a.copyWith(frozen: result.applied, hidden: result.isHard)
+              : a,
+        )
         .toList(growable: false);
     _capabilities = await appLock.capabilities();
     notifyListeners();
     return result;
+  }
+
+  /// Restores every hidden app and clears the freeze list.
+  ///
+  /// Returns the number of apps the platform actually restored.
+  Future<int> unhideAll() async {
+    _setBusy(true);
+    try {
+      final result = await appLock.unhideAll();
+      _apps = await appLock.listApps();
+      _capabilities = await appLock.capabilities();
+      return result.restored;
+    } finally {
+      _setBusy(false);
+    }
   }
 
   /// Refreshes the native capability flags, for use when returning from

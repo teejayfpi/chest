@@ -13,43 +13,52 @@ import 'package:provider/provider.dart';
 /// as Kotlin sends them, so the Dart parsing is exercised too.
 class FakeAppLockChannel {
   FakeAppLockChannel({Map<String, Object?>? capabilities})
-      : capabilities = capabilities ?? _softOnly;
+      : capabilities = capabilities ?? _notProvisioned;
 
   /// The capabilities map the fake device reports.
   Map<String, Object?> capabilities;
 
-  static const Map<String, Object?> _softOnly = {
+  /// A device that has not been provisioned as device owner.
+  static const Map<String, Object?> _notProvisioned = {
+    'deviceOwnerActive': false,
+    'profileOwnerActive': false,
     'deviceAdminActive': false,
     'accessibilityEnabled': true,
-    'canHideApps': true,
+    'hiddenCount': 0,
     'sdkInt': 34,
   };
 
   /// The apps the fake device reports.
-  List<Map<String, Object?>> apps = const [
+  List<Map<String, Object?>> apps = [
     {
       'packageName': 'com.example.photos',
       'label': 'Photos',
       'isSystem': false,
       'frozen': false,
+      'hidden': false,
     },
     {
       'packageName': 'com.example.chat',
       'label': 'Chat',
       'isSystem': false,
       'frozen': true,
+      'hidden': true,
     },
     {
       'packageName': 'android.system.settings',
       'label': 'Settings',
       'isSystem': true,
       'frozen': false,
+      'hidden': false,
     },
   ];
 
   /// Package names that were frozen or unfrozen, in call order.
   final List<String> freezeCalls = [];
   final List<String> unfreezeCalls = [];
+
+  /// Labels passed alongside each freeze, so the caching path is covered.
+  final List<String> freezeLabels = [];
   final List<String> openedSettings = [];
   final List<bool> secureFlags = [];
 
@@ -58,6 +67,9 @@ class FakeAppLockChannel {
 
   /// How many times the device-admin dialog was requested.
   int adminRequests = 0;
+
+  /// How many times the restore-all escape hatch was invoked.
+  int unhideAllCalls = 0;
 
   static const MethodChannel _channel = MethodChannel('com.chest.chest/app_lock');
 
@@ -91,13 +103,20 @@ class FakeAppLockChannel {
           capabilityCalls++;
           return capabilities;
         case 'freeze':
-          final pkg = (call.arguments as Map)['packageName'] as String;
-          freezeCalls.add(pkg);
-          return {'applied': true, 'method': 'device_admin'};
+          final args = call.arguments as Map;
+          freezeCalls.add(args['packageName'] as String);
+          freezeLabels.add(args['label'] as String);
+          // Mirrors the native rule: only a device owner can actually hide.
+          return (capabilities['deviceOwnerActive'] as bool? ?? false)
+              ? {'applied': true, 'method': 'device_owner'}
+              : {'applied': false, 'method': 'soft'};
         case 'unfreeze':
           final pkg = (call.arguments as Map)['packageName'] as String;
           unfreezeCalls.add(pkg);
-          return {'applied': true, 'method': 'device_admin'};
+          return {'applied': true, 'method': 'device_owner'};
+        case 'unhideAll':
+          unhideAllCalls++;
+          return {'applied': true, 'restored': 2, 'failed': 0, 'method': 'device_owner'};
         case 'openAppDetailsSettings':
           openedSettings.add((call.arguments as Map)['packageName'] as String);
           return null;
@@ -125,13 +144,18 @@ class FakeAppLockChannel {
 
   /// A capabilities map for a device with the given tiers active.
   static Map<String, Object?> capabilitiesFor({
+    bool deviceOwnerActive = false,
+    bool profileOwnerActive = false,
     bool deviceAdminActive = false,
     bool accessibilityEnabled = true,
+    int hiddenCount = 0,
   }) =>
       {
+        'deviceOwnerActive': deviceOwnerActive,
+        'profileOwnerActive': profileOwnerActive,
         'deviceAdminActive': deviceAdminActive,
         'accessibilityEnabled': accessibilityEnabled,
-        'canHideApps': true,
+        'hiddenCount': hiddenCount,
         'sdkInt': 34,
       };
 }
@@ -163,16 +187,51 @@ Future<ChestController> pumpFreezer(
 
 void main() {
   group('freezer enforcement panel', () {
-    testWidgets('states that soft freeze is the weaker tier', (tester) async {
+    testWidgets('says device owner is needed when it is not set up', (tester) async {
       await pumpFreezer(tester, channel: FakeAppLockChannel());
 
-      expect(find.text('Soft freeze only'), findsOneWidget);
-      expect(find.textContaining('only send you home'), findsOneWidget);
+      expect(find.text('Device owner not set up'), findsOneWidget);
+      expect(find.textContaining('needs to be the device owner'), findsOneWidget);
       expect(find.text('Grant device admin'), findsOneWidget);
+      // The app guard is already running in the default fake.
       expect(find.text('Enable app guard'), findsNothing);
     });
 
-    testWidgets('reports hard freeze once device admin is granted', (tester) async {
+    testWidgets('shows the provisioning command when not provisioned', (tester) async {
+      await pumpFreezer(tester, channel: FakeAppLockChannel());
+
+      expect(
+        find.text(
+          'adb shell dpm set-device-owner '
+          'com.chest.chest/.applock.ChestDeviceAdminReceiver',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('no accounts'), findsOneWidget);
+    });
+
+    testWidgets('reports hiding active once device owner is granted', (tester) async {
+      await pumpFreezer(
+        tester,
+        channel: FakeAppLockChannel(
+          capabilities: FakeAppLockChannel.capabilitiesFor(
+            deviceOwnerActive: true,
+            accessibilityEnabled: false,
+          ),
+        ),
+      );
+
+      expect(find.text('Launcher hiding active'), findsOneWidget);
+      expect(find.textContaining('hidden from your launcher'), findsOneWidget);
+      expect(find.text('Grant device admin'), findsNothing);
+      expect(find.text('Enable app guard'), findsOneWidget);
+      // The setup command is no longer needed.
+      expect(find.textContaining('adb shell dpm'), findsNothing);
+    });
+
+    testWidgets('device admin alone does not claim launcher hiding', (tester) async {
+      // Regression guard: legacy device admin cannot call setApplicationHidden
+      // on a modern target SDK, so the panel must not imply it can hide.
       await pumpFreezer(
         tester,
         channel: FakeAppLockChannel(
@@ -183,10 +242,8 @@ void main() {
         ),
       );
 
-      expect(find.text('Hard freeze active'), findsOneWidget);
-      expect(find.text('Grant device admin'), findsNothing);
-      expect(find.text('Enable app guard'), findsOneWidget);
-      expect(find.textContaining('disabled by Android itself'), findsOneWidget);
+      expect(find.text('Device owner not set up'), findsOneWidget);
+      expect(find.text('Launcher hiding active'), findsNothing);
     });
   });
 
@@ -237,9 +294,9 @@ void main() {
   });
 
   group('freezer actions', () {
-    testWidgets('toggling an unfrozen app calls freeze', (tester) async {
+    testWidgets('toggling an unfrozen app hides it and badges it', (tester) async {
       final channel = FakeAppLockChannel(
-        capabilities: FakeAppLockChannel.capabilitiesFor(deviceAdminActive: true),
+        capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
       );
       await pumpFreezer(tester, channel: channel);
 
@@ -248,12 +305,39 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(channel.freezeCalls, ['com.example.photos']);
-      expect(find.textContaining('frozen and disabled'), findsOneWidget);
+      expect(find.textContaining('hidden from the launcher'), findsOneWidget);
     });
 
-    testWidgets('toggling a frozen app calls unfreeze', (tester) async {
+    testWidgets('passes the label so it can be cached natively', (tester) async {
       final channel = FakeAppLockChannel(
-        capabilities: FakeAppLockChannel.capabilitiesFor(deviceAdminActive: true),
+        capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
+      );
+      await pumpFreezer(tester, channel: channel);
+
+      await tester.tap(find.byType(Switch).first);
+      await tester.pumpAndSettle();
+
+      // Once hidden, the app vanishes from package queries, so the native side
+      // needs the label to keep listing it.
+      expect(channel.freezeLabels, ['Photos']);
+    });
+
+    testWidgets('refuses to mark an app frozen without device owner', (tester) async {
+      // The native layer reports applied: false, so the switch must stay off
+      // rather than claiming a hide the platform did not perform.
+      final channel = FakeAppLockChannel();
+      await pumpFreezer(tester, channel: channel);
+
+      await tester.tap(find.byType(Switch).first);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('could not be hidden'), findsOneWidget);
+      expect(find.text('1 frozen'), findsOneWidget);
+    });
+
+    testWidgets('toggling a frozen app unhides it', (tester) async {
+      final channel = FakeAppLockChannel(
+        capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
       );
       await pumpFreezer(tester, channel: channel);
 
@@ -262,7 +346,51 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(channel.unfreezeCalls, ['com.example.chat']);
-      expect(find.text('Chat released.'), findsOneWidget);
+      expect(find.text('Chat is back in the launcher.'), findsOneWidget);
+    });
+
+    testWidgets('a hidden app is badged and stays listed', (tester) async {
+      await pumpFreezer(
+        tester,
+        channel: FakeAppLockChannel(
+          capabilities: FakeAppLockChannel.capabilitiesFor(deviceOwnerActive: true),
+        ),
+      );
+
+      // Chat is hidden, and must remain visible in the list so it can be
+      // unfrozen — that is the whole reason labels are cached natively.
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.text('HIDDEN'), findsOneWidget);
+    });
+
+    testWidgets('restore all is offered only when something is frozen',
+        (tester) async {
+      await pumpFreezer(tester, channel: FakeAppLockChannel());
+      expect(find.text('Restore all'), findsOneWidget);
+
+      final clean = FakeAppLockChannel();
+      clean.apps = [
+        {
+          'packageName': 'com.example.photos',
+          'label': 'Photos',
+          'isSystem': false,
+          'frozen': false,
+          'hidden': false,
+        },
+      ];
+      await pumpFreezer(tester, channel: clean);
+      expect(find.text('Restore all'), findsNothing);
+    });
+
+    testWidgets('restore all calls the escape hatch', (tester) async {
+      final channel = FakeAppLockChannel();
+      await pumpFreezer(tester, channel: channel);
+
+      await tester.tap(find.text('Restore all'));
+      await tester.pumpAndSettle();
+
+      expect(channel.unhideAllCalls, 1);
+      expect(find.text('2 apps restored to the launcher.'), findsOneWidget);
     });
 
     testWidgets('the app-info button opens system settings', (tester) async {
@@ -275,21 +403,21 @@ void main() {
       expect(channel.openedSettings, ['com.example.photos']);
     });
 
-    testWidgets('granting device admin re-reads the capabilities', (tester) async {
+    testWidgets('re-checking capabilities picks up new provisioning', (tester) async {
       final channel = FakeAppLockChannel();
       await pumpFreezer(tester, channel: channel);
 
-      expect(find.text('Soft freeze only'), findsOneWidget);
+      expect(find.text('Device owner not set up'), findsOneWidget);
 
-      // The native side reports admin as active from now on.
+      // The user has now run the provisioning command.
       channel.capabilities = FakeAppLockChannel.capabilitiesFor(
-        deviceAdminActive: true,
+        deviceOwnerActive: true,
         accessibilityEnabled: true,
       );
-      await tester.tap(find.text('Grant device admin'));
+      await tester.tap(find.text('Re-check'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Hard freeze active'), findsOneWidget);
+      expect(find.text('Launcher hiding active'), findsOneWidget);
     });
   });
 }

@@ -20,16 +20,40 @@ the Dart layer degrades gracefully off-Android.
   Kotlin freezer; `biometric_service.dart` wraps `local_auth`.
 - `lib/state/chest_controller.dart` — single source of truth. Owns the auto-lock
   timer and every call into crypto/platform. Widgets never touch keys or channels.
-- `android/app/src/main/kotlin/com/chest/chest/` — `applock/` holds the device
-  admin receiver, the accessibility service and the freeze store/manager.
+- `android/app/src/main/kotlin/com/chest/chest/` — `applock/` holds the
+  device-admin receiver, the accessibility service, the hide store/manager and
+  the boot receiver.
 
 ## Commands
 
 ```bash
 flutter analyze            # must be clean
-flutter test               # 73 tests
+flutter test               # 80 tests
 flutter build apk --release
 ```
+
+## Hiding apps is device-owner only
+
+`DevicePolicyManager.setApplicationHidden` is restricted to a **device owner or
+profile owner**. A legacy device admin calling it gets `SecurityException` on any
+app targeting API 24+, which Chest does. This is the single most important thing
+to understand before touching `ChestAppLockManager`: device-admin rights do not
+let Chest hide anything, and code that assumes otherwise is wrong.
+
+Provisioning is `adb shell dpm set-device-owner
+com.chest.chest/.applock.ChestDeviceAdminReceiver`, and it needs a device with no
+accounts and no secondary users.
+
+Three invariants keep the feature from stranding a user:
+
+1. **Labels are cached at freeze time.** A hidden package disappears from
+   `queryIntentActivities`, so without the cached label it would vanish from the
+   freeze list and could never be unhidden.
+2. **Nothing is recorded unless the platform confirmed the hide.** `freeze()`
+   only writes to the store when `setApplicationHidden` returned true, so the UI
+   cannot claim a freeze that is not in force.
+3. **`unhideAll` is the escape hatch.** It iterates the local record because no
+   API enumerates hidden packages.
 
 ## Gotchas
 
@@ -44,9 +68,11 @@ flutter build apk --release
 - **Unmocked MethodChannels never reply in `flutter_test`.** Any code that
   `await`s a channel will hang. `test/screens/freezer_screen_test.dart` exposes
   `FakeAppLockChannel`, which mocks both the app-lock and security channels —
-  reuse it.
+  reuse it. Its `freeze` handler mirrors the native rule that only a device owner
+  gets `applied: true`, so tests exercise the honest-refusal path.
 - **Tall viewports are required** for the form screens, which extend past the
   default 800x600 test surface.
-- The freeze UI has two honest tiers: device admin is a real system-enforced
-  freeze, the accessibility service is a weaker "send home" guard. Do not present
-  them as equivalent.
+- The Kotlin is not covered by `flutter test`. It is only checked by
+  `flutter build apk`, which needs `JAVA_HOME` set (source `/workspace/env.sh`).
+  A JDK can vanish from this image; reinstall with
+  `sudo apt-get install -y openjdk-21-jdk-headless`.

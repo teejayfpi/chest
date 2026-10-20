@@ -40,11 +40,15 @@ class AppLockBridge {
   }
 
   /// Freezes [packageName].
-  Future<FreezeResult> freeze(String packageName) async {
+  ///
+  /// [label] is passed through so the native side can cache it: once a package
+  /// is hidden it disappears from package queries, and the cached label is the
+  /// only way to still show it in the freeze list.
+  Future<FreezeResult> freeze(String packageName, {String? label}) async {
     try {
       final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
         'freeze',
-        {'packageName': packageName},
+        {'packageName': packageName, 'label': label ?? packageName},
       );
       _available = true;
       if (raw == null) return const FreezeResult(applied: false, method: 'soft');
@@ -84,6 +88,23 @@ class AppLockBridge {
       return FreezeCapabilities.unsupported;
     } on PlatformException {
       return FreezeCapabilities.unsupported;
+    }
+  }
+
+  /// Restores every app Chest has hidden.
+  ///
+  /// The escape hatch: if a freeze leaves the device in a state the user cannot
+  /// undo from the list, this clears it in one call.
+  Future<FreezeResult> unhideAll() async {
+    try {
+      final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('unhideAll');
+      _available = true;
+      if (raw == null) return const FreezeResult(applied: false, method: 'soft');
+      return FreezeResult.fromMap(raw);
+    } on MissingPluginException {
+      return const FreezeResult(applied: false, method: 'soft');
+    } on PlatformException {
+      return const FreezeResult(applied: false, method: 'soft');
     }
   }
 

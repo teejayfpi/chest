@@ -62,6 +62,7 @@ class FreezableApp {
     required this.label,
     required this.isSystem,
     required this.frozen,
+    this.hidden = false,
   });
 
   /// Android package identifier.
@@ -76,64 +77,105 @@ class FreezableApp {
   /// Whether the user has frozen it.
   final bool frozen;
 
+  /// Whether the platform has actually removed it from the launcher.
+  ///
+  /// This is distinct from [frozen]: an app can be marked frozen while only the
+  /// accessibility guard is enforcing it, in which case it is still visible in
+  /// the launcher. Only a true hide takes it off the launcher entirely.
+  final bool hidden;
+
   /// Parses the map returned by the native method channel.
   factory FreezableApp.fromMap(Map<dynamic, dynamic> map) => FreezableApp(
         packageName: map['packageName'] as String,
         label: map['label'] as String,
         isSystem: (map['isSystem'] as bool?) ?? false,
         frozen: (map['frozen'] as bool?) ?? false,
+        hidden: (map['hidden'] as bool?) ?? false,
       );
 
   /// Copy with a different frozen state.
-  FreezableApp copyWith({bool? frozen}) => FreezableApp(
+  FreezableApp copyWith({bool? frozen, bool? hidden}) => FreezableApp(
         packageName: packageName,
         label: label,
         isSystem: isSystem,
         frozen: frozen ?? this.frozen,
+        hidden: hidden ?? this.hidden,
       );
 }
 
 /// Which enforcement tiers are currently available on the device.
 class FreezeCapabilities {
   const FreezeCapabilities({
+    required this.deviceOwnerActive,
+    required this.profileOwnerActive,
     required this.deviceAdminActive,
     required this.accessibilityEnabled,
-    required this.canHideApps,
+    required this.hiddenCount,
     required this.sdkInt,
+    this.packageName = 'com.chest.chest',
   });
 
-  /// True when Chest holds device-admin rights, enabling a hard freeze.
+  /// True when Chest is provisioned as device owner.
+  ///
+  /// This is the only state in which an app can actually be hidden from the
+  /// launcher. Legacy device-admin rights are deliberately not enough: the
+  /// platform rejects `setApplicationHidden` from a legacy admin on any app
+  /// targeting API 24 or above.
+  final bool deviceOwnerActive;
+
+  /// True when Chest is a profile owner. Also sufficient to hide apps.
+  final bool profileOwnerActive;
+
+  /// True when Chest holds legacy device-admin rights.
   final bool deviceAdminActive;
 
   /// True when the enforcement accessibility service is running.
   final bool accessibilityEnabled;
 
-  /// True when the platform supports `setApplicationHidden` (API 21+).
-  final bool canHideApps;
+  /// Number of apps Chest currently has hidden.
+  final int hiddenCount;
 
   /// Android API level.
   final int sdkInt;
 
-  /// True when freezing is fully enforced at the OS level.
-  bool get hardFreezeAvailable => deviceAdminActive && canHideApps;
+  /// Chest's own package name, used to build the provisioning command.
+  final String packageName;
+
+  /// True when the platform will accept a hide request.
+  bool get canHideApps => deviceOwnerActive || profileOwnerActive;
+
+  /// True when a freeze is enforced by the platform rather than by Chest.
+  bool get hardFreezeAvailable => canHideApps;
 
   /// True when at least one enforcement mechanism is active.
   bool get anyEnforcement => hardFreezeAvailable || accessibilityEnabled;
 
+  /// The device-owner provisioning command, for the setup screen.
+  ///
+  /// `dpm set-device-owner` is a development tool: it only succeeds when the
+  /// device has no accounts and no secondary users, which in practice means a
+  /// freshly factory-reset phone.
+  String get provisioningCommand =>
+      'adb shell dpm set-device-owner $packageName/.applock.ChestDeviceAdminReceiver';
+
   /// Parses the map returned by the native method channel.
-  factory FreezeCapabilities.fromMap(Map<dynamic, dynamic> map) =>
-      FreezeCapabilities(
+  factory FreezeCapabilities.fromMap(Map<dynamic, dynamic> map) => FreezeCapabilities(
+        deviceOwnerActive: (map['deviceOwnerActive'] as bool?) ?? false,
+        profileOwnerActive: (map['profileOwnerActive'] as bool?) ?? false,
         deviceAdminActive: (map['deviceAdminActive'] as bool?) ?? false,
         accessibilityEnabled: (map['accessibilityEnabled'] as bool?) ?? false,
-        canHideApps: (map['canHideApps'] as bool?) ?? false,
+        hiddenCount: (map['hiddenCount'] as int?) ?? 0,
         sdkInt: (map['sdkInt'] as int?) ?? 0,
+        packageName: (map['packageName'] as String?) ?? 'com.chest.chest',
       );
 
   /// Fallback used on platforms without the native bridge.
   static const FreezeCapabilities unsupported = FreezeCapabilities(
+    deviceOwnerActive: false,
+    profileOwnerActive: false,
     deviceAdminActive: false,
     accessibilityEnabled: false,
-    canHideApps: false,
+    hiddenCount: 0,
     sdkInt: 0,
   );
 }
@@ -185,21 +227,37 @@ class HardwareSecurity {
 
 /// Outcome of a freeze or unfreeze request.
 class FreezeResult {
-  const FreezeResult({required this.applied, required this.method});
+  const FreezeResult({
+    required this.applied,
+    required this.method,
+    this.restored = 0,
+    this.failed = 0,
+  });
 
   /// True when the platform actually enforced the change.
   final bool applied;
 
-  /// `device_admin`, `soft` or `protected`.
+  /// `device_owner`, `device_admin`, `soft` or `protected`.
   final String method;
 
-  /// True when the freeze is enforced by the OS rather than by Chest's service.
-  bool get isHard => applied && method == 'device_admin';
+  /// Apps restored by an [AppLockBridge.unhideAll] call.
+  final int restored;
+
+  /// Apps that could not be restored by an [AppLockBridge.unhideAll] call.
+  final int failed;
+
+  /// True when the freeze removed the app from the launcher.
+  ///
+  /// Only a device-owner hide achieves this; the soft tier leaves the app
+  /// visible and merely bounces the user home.
+  bool get isHard => applied && method == 'device_owner';
 
   /// Parses the map returned by the native method channel.
   factory FreezeResult.fromMap(Map<dynamic, dynamic> map) => FreezeResult(
         applied: (map['applied'] as bool?) ?? false,
         method: (map['method'] as String?) ?? 'soft',
+        restored: (map['restored'] as int?) ?? 0,
+        failed: (map['failed'] as int?) ?? 0,
       );
 }
 
